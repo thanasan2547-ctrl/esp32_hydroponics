@@ -1,15 +1,26 @@
 {
-  "buildCommand": null,
   "outputDirectory": "public",
+  "installCommand": "echo 'No dependencies to install'",
+  "buildCommand": "echo 'No build step required'",
+  "devCommand": "npx serve public",
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "https://your-backend-url.onrender.com/api/$1" }
+    {
+      "source": "/api/(.*)",
+      "destination": "https://your-backend-url.onrender.com/api/$1"
+    }
   ],
   "headers": [
     {
       "source": "/(.*)",
       "headers": [
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "X-Frame-Options", "value": "DENY" }
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        }
       ]
     }
   ]
