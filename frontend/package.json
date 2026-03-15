@@ -1,0 +1,6 @@
+{
+  "name": "hydroponics-frontend",
+  "version": "1.0.0",
+  "description": "Tomato Hydroponics Dashboard - Vercel Static Deploy",
+  "private": true
+}

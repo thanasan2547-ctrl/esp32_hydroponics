@@ -1,0 +1,5 @@
+# Vercel should only deploy the public/ directory
+# Ignore everything else in the monorepo
+../backend/
+../project_esp32_tomato_hydroponics/
+../.github/
