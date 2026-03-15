@@ -1,6 +1,19 @@
 {
   "name": "hydroponics-frontend",
   "version": "1.0.0",
-  "description": "Tomato Hydroponics Dashboard - Vercel Static Deploy",
+  "description": "Smart Hydroponics Dashboard - Cloud Version",
+  "main": "public/index.html",
+  "scripts": {
+    "build": "echo 'Build complete'",
+    "start": "npx serve public"
+  },
+  "keywords": [
+    "hydroponics",
+    "dashboard",
+    "mqtt",
+    "esp32"
+  ],
+  "author": "",
+  "license": "MIT",
   "private": true
 }
