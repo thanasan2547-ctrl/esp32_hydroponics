@@ -2277,21 +2277,8 @@
                 if (s.active) defaultStage = s;
             });
 
-            // Auto-set the active stage requirements
-            if (defaultStage) {
-                targetEC = defaultStage.ec;
-                targetPH = defaultStage.ph;
-                el.ecIn.value = targetEC;
-                el.phIn.value = targetPH;
-                updateSensors(ecHistory.length > 0 ? ecHistory[ecHistory.length - 1] : '--',
-                    phHistory.length > 0 ? phHistory[phHistory.length - 1] : '--',
-                    waterHistory.length > 0 ? waterHistory[waterHistory.length - 1] : 0);
-
-                if (isConnected) {
-                    sendMQTT({ command: 'set_ec', value: targetEC });
-                    sendMQTT({ command: 'set_ph', value: targetPH });
-                }
-            }
+            // Don't auto-set stage requirements on load - keep 0.0 defaults
+            // User must manually click stage button to set targets
 
             // Close sidebar automatically on mobile
             if (window.innerWidth <= 768) {
@@ -2308,8 +2295,8 @@
 
         const waterHistory = [];
 
-        let targetEC = 2.5;
-        let targetPH = 6.0;
+        let targetEC = 0.0;
+        let targetPH = 0.0;
 
         const el = {
             ecVal: document.getElementById('ecVal'),
@@ -2853,7 +2840,10 @@
     </script>
 </body>
 
-</html>/ /   t e s t   G i t H u b   A c t i o n s  
- / /   t e s t   p e r s o n a l   p r o j e c t  
- / /   t e s t i n g   V e r c e l   G i t H u b   A p p   -   0 3 / 1 5 / 2 0 2 6   2 2 : 4 0 : 5 0  
+</html>/ /   t e s t   G i t H u b   A c t i o n s 
+ 
+ / /   t e s t   p e r s o n a l   p r o j e c t 
+ 
+ / /   t e s t i n g   V e r c e l   G i t H u b   A p p   -   0 3 / 1 5 / 2 0 2 6   2 2 : 4 0 : 5 0 
+ 
  
