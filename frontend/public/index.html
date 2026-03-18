@@ -1,3 +1,4 @@
+@
 <!DOCTYPE html>
 <html lang="th">
 
@@ -1796,7 +1797,7 @@
                     <div class="sensor-unit">mS/cm</div>
                     <div class="sensor-footer">
                         <span class="sensor-badge badge-ok" id="ecBadge">เหมาะสม</span>
-                        <span class="sensor-target" id="ecTarget">Target: 1.5 - 2.5</span>
+                        <span class="sensor-target" id="ecTarget">Target: 0.0</span>
                     </div>
                 </div>
 
@@ -1810,7 +1811,7 @@
                     <div class="sensor-unit">Level</div>
                     <div class="sensor-footer">
                         <span class="sensor-badge badge-ok" id="phBadge">เหมาะสม</span>
-                        <span class="sensor-target" id="phTarget">Target: 5.5 - 7.0</span>
+                        <span class="sensor-target" id="phTarget">Target: 0.0</span>
                     </div>
                 </div>
             </div>
@@ -1932,15 +1933,15 @@
                     <div class="ec-setting-label">🎯 Set Target EC</div>
                     <div class="ec-row">
                         <input type="number" class="ec-input" id="ecIn" placeholder="EC (0-5)" step="0.1" min="0"
-                            max="5" value="2.5">
+                            max="5" value="0.0">
                         <button class="ec-btn" onclick="setEC()">Set</button>
                     </div>
                 </div>
                 <div class="ec-setting">
                     <div class="ec-setting-label">🧪 Set Target pH</div>
                     <div class="ec-row">
-                        <input type="number" class="ec-input" id="phIn" placeholder="pH (3-9)" step="0.1" min="3"
-                            max="9" value="6.0">
+                        <input type="number" class="ec-input" id="phIn" placeholder="pH (3-9)" step="0.1" min="0"
+                            max="9" value="0.0">
                         <button class="ec-btn" style="background: var(--ph-color);" onclick="setPH()">Set</button>
                     </div>
                 </div>
@@ -2265,16 +2266,12 @@
             const stagesContainer = document.getElementById('stagesContainer');
             stagesContainer.innerHTML = ''; // Clear existing
 
-            let defaultStage = null;
-
             pd.stages.forEach(s => {
                 const btn = document.createElement('button');
-                btn.className = 'stage-btn' + (s.active ? ' active' : '');
+                btn.className = 'stage-btn';
                 btn.onclick = function () { setStage(s.ec, s.ph, this); };
                 btn.innerHTML = `<span class="stage-emoji">${s.icon}</span> ${s.name}<span style="font-size:11px; opacity:0.7; margin-left:4px;">(${s.days})</span>`;
                 stagesContainer.appendChild(btn);
-
-                if (s.active) defaultStage = s;
             });
 
             // Don't auto-set stage requirements on load - keep 0.0 defaults
@@ -2297,6 +2294,7 @@
 
         let targetEC = 0.0;
         let targetPH = 0.0;
+        let targetLockUntilManualSet = true;
 
         const el = {
             ecVal: document.getElementById('ecVal'),
@@ -2312,6 +2310,22 @@
             themeOverlay: document.getElementById('themeOverlay'),
         };
 
+        function formatTargetLabel(target) {
+            if (typeof target !== 'number' || Number.isNaN(target) || target <= 0) {
+                return 'Target: 0.0';
+            }
+            const min = Math.max(0, target - 0.5);
+            const max = target + 0.5;
+            return `Target: ${min.toFixed(1)} - ${max.toFixed(1)}`;
+        }
+
+        function refreshTargetUI() {
+            el.ecTarget.textContent = formatTargetLabel(targetEC);
+            el.phTarget.textContent = formatTargetLabel(targetPH);
+            el.ecIn.value = Number(targetEC).toFixed(1);
+            el.phIn.value = Number(targetPH).toFixed(1);
+        }
+
 
         /* ============================================
            SENSOR UPDATE
@@ -2325,12 +2339,12 @@
                 el.ecVal.textContent = (ec >= 0.001) ? ec.toFixed(2) : '--';
                 el.ecBadge.textContent = 'Disconnected';
                 el.ecBadge.className = 'sensor-badge badge-warn';
-                el.ecTarget.textContent = 'Target: ' + (targetEC - 0.5).toFixed(1) + ' - ' + (targetEC + 0.5).toFixed(1);
+                el.ecTarget.textContent = formatTargetLabel(targetEC);
 
                 el.phVal.textContent = (ph > 0 && ph < 13.9) ? ph.toFixed(1) : '--';
                 el.phBadge.textContent = 'Disconnected';
                 el.phBadge.className = 'sensor-badge badge-warn';
-                el.phTarget.textContent = 'Target: ' + (targetPH - 0.5).toFixed(1) + ' - ' + (targetPH + 0.5).toFixed(1);
+                el.phTarget.textContent = formatTargetLabel(targetPH);
 
                 el.waterVal.textContent = (typeof water === 'number') ? Math.round(water) : '--';
                 el.waterBar.style.width = (typeof water === 'number') ? water + '%' : '0%';
@@ -2343,14 +2357,14 @@
             const ecS = getECStatus(ec);
             el.ecBadge.textContent = ecS.text;
             el.ecBadge.className = 'sensor-badge ' + ecS.cls;
-            el.ecTarget.textContent = 'Target: ' + (targetEC - 0.5).toFixed(1) + ' - ' + (targetEC + 0.5).toFixed(1);
+            el.ecTarget.textContent = formatTargetLabel(targetEC);
 
             // pH
             el.phVal.textContent = ph.toFixed(1);
             const phS = getPHStatus(ph);
             el.phBadge.textContent = phS.text;
             el.phBadge.className = 'sensor-badge ' + phS.cls;
-            el.phTarget.textContent = 'Target: ' + (targetPH - 0.5).toFixed(1) + ' - ' + (targetPH + 0.5).toFixed(1);
+            el.phTarget.textContent = formatTargetLabel(targetPH);
 
             // Water
             const pct = Math.max(0, Math.min(100, water));
@@ -2628,10 +2642,14 @@
                             syncAutoButtons(val === '1');
                             break;
                         case T.CTRL_EC:
+                            if (targetLockUntilManualSet) break;
                             targetEC = parseFloat(val);
+                            refreshTargetUI();
                             break;
                         case T.CTRL_PH:
+                            if (targetLockUntilManualSet) break;
                             targetPH = parseFloat(val);
+                            refreshTargetUI();
                             break;
                     }
                 });
@@ -2764,7 +2782,9 @@
         function setEC() {
             const v = parseFloat(el.ecIn.value);
             if (!isNaN(v) && v >= 0 && v <= 5) {
+                targetLockUntilManualSet = false;
                 targetEC = v;
+                refreshTargetUI();
                 updateSensors(liveEC || '--', livePH || '--', liveWater || '--');
                 if (isConnected) mqttPub(T.CTRL_EC, v);
             }
@@ -2773,7 +2793,9 @@
         function setPH() {
             const v = parseFloat(el.phIn.value);
             if (!isNaN(v) && v >= 3 && v <= 9) {
+                targetLockUntilManualSet = false;
                 targetPH = v;
+                refreshTargetUI();
                 updateSensors(liveEC || '--', livePH || '--', liveWater || '--');
                 if (isConnected) mqttPub(T.CTRL_PH, v);
             }
@@ -2794,10 +2816,11 @@
         function setStage(ec, ph, btn) {
             document.querySelectorAll('.stage-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
+            targetLockUntilManualSet = false;
             targetEC = ec;
             targetPH = ph;
-            el.ecIn.value = ec;
-            el.phIn.value = ph;
+            refreshTargetUI();
+            updateSensors(liveEC || '--', livePH || '--', liveWater || '--');
             if (isConnected) {
                 mqttPub(T.CTRL_EC, ec);
                 mqttPub(T.CTRL_PH, ph);
@@ -2828,6 +2851,7 @@
             pumpToggle('mainPump', false);
         }
 
+        el.ecIn.addEventListener('keypress', e => { if (e.key === 'Enter') setEC(); });
         el.phIn.addEventListener('keypress', e => { if (e.key === 'Enter') setPH(); });
 
         // Dosing UI refs
@@ -2836,14 +2860,10 @@
         };
 
         // On load
+        refreshTargetUI();
+        selectPlant('tomato');
         connectToCloud(); // connect automatically
     </script>
 </body>
 
-</html>/ /   t e s t   G i t H u b   A c t i o n s 
- 
- / /   t e s t   p e r s o n a l   p r o j e c t 
- 
- / /   t e s t i n g   V e r c e l   G i t H u b   A p p   -   0 3 / 1 5 / 2 0 2 6   2 2 : 4 0 : 5 0 
- 
- 
+</html>
