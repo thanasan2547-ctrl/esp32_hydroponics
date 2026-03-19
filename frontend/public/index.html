@@ -2661,9 +2661,6 @@
         function setPumpUI(id, on) {
             const cb = document.getElementById(id);
             if (cb) cb.checked = on;
-            // Sync pH Down Main Pump (same relay)
-            if (id === 'pPH') { const m = document.getElementById('pM'); if (m) m.checked = on; }
-            if (id === 'pM') { const p = document.getElementById('pPH'); if (p) p.checked = on; }
         }
 
         async function loadSensorHistory() {
@@ -2768,13 +2765,10 @@
             if (topic && isConnected) {
                 mqttPub(topic, on ? '1' : '0');
             }
-            // pH Down and Main Pump are the same relay in firmware
             if (pump === 'phDown') {
                 setPumpUI('pPH', on);
-                setPumpUI('pM', on);
             } else if (pump === 'mainPump') {
                 setPumpUI('pM', on);
-                setPumpUI('pPH', on);
             }
         }
 

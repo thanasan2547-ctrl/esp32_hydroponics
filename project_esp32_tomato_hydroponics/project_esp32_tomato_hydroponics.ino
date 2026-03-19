@@ -470,8 +470,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.printf("[MQTT] %s => %s\n", topic, msg);
 
   if (strcmp(topic, T_SYS_EMERGENCY) == 0) {
-    emergencyStopActive = true;
+    // Just stop everything normally (don't flag hardware emergencyStopActive or it will fight the physical button)
     autoMode = false;
+    dailyScheduleActive = false; // Override the daily loop
     stopAllPumps(true);
     mqtt.publish(T_SYS_AUTO, "0");
     return;
