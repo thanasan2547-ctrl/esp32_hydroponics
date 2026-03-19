@@ -67,10 +67,10 @@ U8G2_ST7920_128X64_F_SW_SPI u8g2(U8G2_R0, LCD_CLK, LCD_DATA, LCD_CS, LCD_RST);
 #define EC_DEFAULT_TEMP   25.0f
 
 // ---- WiFi ----
-//const char* WIFI_SSID = "iPhone ของ Mac";
-//const char* WIFI_PASS = "88888888";
-const char* WIFI_SSID = "Yumgaizap";
-const char* WIFI_PASS = "0625321533";
+const char* WIFI_SSID = "Pew";
+const char* WIFI_PASS = "88888888";
+//const char* WIFI_SSID = "Yumgaizap";
+//const char* WIFI_PASS = "0625321533";
 
 // ---- MQTT ----
 const char* MQTT_SERVER = "8218cf51f5de4ac5a776aa0efb931888.s1.eu.hivemq.cloud";
@@ -614,30 +614,38 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   if (strcmp(topic, T_PUMP_A) == 0) {
     bool on = (msg[0] == '1');
-    manualOverride = true;
-    autoMode = false;
-    pumpA_on = on;
-    applyRelayStates(true);
-    sendSensorData(); // keep UI in sync
+    if (pumpA_on != on) {
+      manualOverride = true;
+      autoMode = false;
+      pumpA_on = on;
+      applyRelayStates(true);
+      sendSensorData(); // keep UI in sync
+    }
   } else if (strcmp(topic, T_PUMP_B) == 0) {
     bool on = (msg[0] == '1');
-    manualOverride = true;
-    autoMode = false;
-    pumpB_on = on;
-    applyRelayStates(true);
-    sendSensorData();
+    if (pumpB_on != on) {
+      manualOverride = true;
+      autoMode = false;
+      pumpB_on = on;
+      applyRelayStates(true);
+      sendSensorData();
+    }
   } else if (strcmp(topic, T_PUMP_PH) == 0) {
     bool on = (msg[0] == '1');
-    manualOverride = true;
-    autoMode = false;
-    pumpPh_on = on;
-    applyRelayStates(true);
-    sendSensorData();
+    if (pumpPh_on != on) {
+      manualOverride = true;
+      autoMode = false;
+      pumpPh_on = on;
+      applyRelayStates(true);
+      sendSensorData();
+    }
   } else if (strcmp(topic, T_PUMP_MAIN) == 0) {
     bool on = (msg[0] == '1');
-    manualOverride = true;
-    autoMode = false;
-    setMainFlow(on, true);
+    if (mainPump_on != on) {
+      manualOverride = true;
+      autoMode = false;
+      setMainFlow(on, true);
+    }
   } else if (strcmp(topic, T_CTRL_EC) == 0) {
     targetEc = atof(msg);
     activeStageIndex = -1;
