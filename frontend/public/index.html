@@ -1096,8 +1096,13 @@
         }
 
         .auto-btn.stop {
-            background: linear-gradient(135deg, #EF4444, #DC2626);
             color: white;
+        }
+
+        .auto-btn.stop.emergency-active {
+            background: linear-gradient(135deg, #3B82F6, #2563EB);
+            box-shadow: 0 0 15px rgba(59, 130, 246, 0.6);
+            animation: pulse 1.5s infinite;
         }
 
         .auto-btn:disabled {
