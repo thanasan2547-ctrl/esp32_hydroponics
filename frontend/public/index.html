@@ -2558,6 +2558,7 @@
             SYS_AUTO: 'hydroponics/system/auto',
             SYS_EMERGENCY: 'hydroponics/system/emergency',
             SYS_STATUS: 'hydroponics/system/status',
+            SYS_STATE: 'hydroponics/system/state',
         };
 
         let client = null;
@@ -2595,7 +2596,7 @@
                     client.subscribe([
                         T.SENSOR_EC, T.SENSOR_PH, T.SENSOR_WATER,
                         T.PUMP_A, T.PUMP_B, T.PUMP_PH, T.PUMP_MAIN,
-                        T.SYS_AUTO, T.SYS_STATUS,
+                        T.SYS_AUTO, T.SYS_STATUS, T.SYS_STATE,
                         T.CTRL_EC, T.CTRL_PH,
                     ]);
 
@@ -2639,6 +2640,26 @@
                             break;
                         case T.SYS_AUTO:
                             syncAutoButtons(val === '1');
+                            break;
+                        case T.SYS_STATE:
+                            try {
+                                const state = JSON.parse(val);
+                                if (state) {
+                                    setPumpUI('pA', !!state.pumpA);
+                                    setPumpUI('pB', !!state.pumpB);
+                                    setPumpUI('pPH', !!state.pumpPh);
+                                    setPumpUI('pM', !!state.mainPump);
+                                    syncAutoButtons(!!state.auto);
+
+                                    // Emergency override display
+                                    if (state.emergency) {
+                                        document.getElementById('statusTxt').textContent = 'EMERGENCY STOP';
+                                        document.getElementById('dot').className = 'status-dot off';
+                                    }
+                                }
+                            } catch (e) {
+                                console.warn('Invalid SYS_STATE payload', val);
+                            }
                             break;
                         case T.CTRL_EC:
                             if (targetLockUntilManualSet) break;
@@ -2765,11 +2786,11 @@
             if (topic && isConnected) {
                 mqttPub(topic, on ? '1' : '0');
             }
-            if (pump === 'phDown') {
-                setPumpUI('pPH', on);
-            } else if (pump === 'mainPump') {
-                setPumpUI('pM', on);
-            }
+            // Update toggles instantly (state will also sync from ESP via SYS_STATE or individual topics)
+            if (pump === 'pumpA') setPumpUI('pA', on);
+            if (pump === 'pumpB') setPumpUI('pB', on);
+            if (pump === 'phDown') setPumpUI('pPH', on);
+            if (pump === 'mainPump') setPumpUI('pM', on);
         }
 
         function setEC() {
@@ -2841,6 +2862,7 @@
         function allPumpsOff() {
             pumpToggle('pumpA', false);
             pumpToggle('pumpB', false);
+            pumpToggle('phDown', false);
             pumpToggle('mainPump', false);
         }
 

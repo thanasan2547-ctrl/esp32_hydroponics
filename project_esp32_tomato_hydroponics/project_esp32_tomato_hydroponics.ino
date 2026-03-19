@@ -67,6 +67,8 @@ U8G2_ST7920_128X64_F_SW_SPI u8g2(U8G2_R0, LCD_CLK, LCD_DATA, LCD_CS, LCD_RST);
 #define EC_DEFAULT_TEMP   25.0f
 
 // ---- WiFi ----
+//const char* WIFI_SSID = "iPhone ของ Mac";
+//const char* WIFI_PASS = "88888888";
 const char* WIFI_SSID = "Yumgaizap";
 const char* WIFI_PASS = "0625321533";
 
@@ -86,6 +88,7 @@ const char* T_PUMP_PH       = "hydroponics/pump/ph";
 const char* T_PUMP_MAIN     = "hydroponics/pump/main";
 const char* T_SYS_STATUS    = "hydroponics/system/status";
 const char* T_SYS_AUTO      = "hydroponics/system/auto";
+const char* T_SYS_STATE     = "hydroponics/system/state";
 
 // Subscribe topics
 const char* T_CTRL_EC       = "hydroponics/control/ec_target";
@@ -103,8 +106,26 @@ bool pumpPh_on = false;
 bool mainPump_on = false;
 bool solenoid1_on = false;
 
+// Track the last output state written to the relays to avoid repeated toggles
+bool relayPumpA_out = false;
+bool relayPumpB_out = false;
+bool relayPumpPh_out = false;
+bool relayMainPump_out = false;
+bool relaySolenoid1_out = false;
+
 float targetEc = 2.0f;
 float targetPh = 6.2f;
+
+// Keep a small sliding window of recent readings to stabilize sensor noise.
+// This smooths values used for auto dosing and MQTT reports.
+const int SENSOR_SMOOTH_SAMPLES = 10;
+float ecSamples[SENSOR_SMOOTH_SAMPLES] = {0};
+float phSamples[SENSOR_SMOOTH_SAMPLES] = {0};
+int ecSampleIndex = 0;
+int phSampleIndex = 0;
+int ecSampleCount = 0;
+int phSampleCount = 0;
+
 float ecValue = 0.0f;
 float phValue = 0.0f;
 float waterLevel = 0.0f;
@@ -122,15 +143,21 @@ const unsigned long WIFI_LOG_INTERVAL = 1500;
 
 // ---- Auto dosing ----
 bool autoMode = false;
+// When a user toggles a pump manually (button or MQTT), we suspend automatic dosing until
+// auto mode is explicitly re-enabled. This prevents auto logic from fighting manual input.
+bool manualOverride = false;
+
 const float EC_TOLERANCE = 0.05f;
 const float PH_TOLERANCE = 0.05f;
 
 enum AutoState { DOSING_IDLE, DOSING_A, DOSING_WAIT_B, DOSING_B, DOSING_MIX_EC, DOSING_PH, DOSING_MIX_PH };
 AutoState autoState = DOSING_IDLE;
 unsigned long dosingStateStartTime = 0;
+unsigned long dosingAStartTime = 0;
+unsigned long dosingBStartTime = 0;
 
 const unsigned long PUMP_DOSE_MS = 2000;        // Dose for 2s
-const unsigned long PUMP_B_DELAY = 2000;        // Wait 2s before A -> B
+const unsigned long PUMP_B_DELAY = 3000;        // Wait 3s after pump A starts before turning on pump B
 const unsigned long PUMP_MIXING_MS = 30000;     // Mix for 30s before reading again
 const unsigned long PH_DOSE_MS = 1500;          // Dose pH for 1.5s
 const unsigned long PH_MIXING_MS = 20000;       // Mix pH for 20s
@@ -199,22 +226,101 @@ void writeRelay(uint8_t relayPin, bool on) {
   }
 }
 
+void publishSystemState() {
+  if (!mqtt.connected()) return;
+
+  char buf[128];
+  int len = snprintf(
+    buf, sizeof(buf),
+    "{\"pumpA\":%d,\"pumpB\":%d,\"pumpPh\":%d,\"mainPump\":%d,\"solenoid1\":%d,\"auto\":%d,\"emergency\":%d}",
+    pumpA_on ? 1 : 0,
+    pumpB_on ? 1 : 0,
+    pumpPh_on ? 1 : 0,
+    mainPump_on ? 1 : 0,
+    solenoid1_on ? 1 : 0,
+    autoMode ? 1 : 0,
+    emergencyStopActive ? 1 : 0
+  );
+
+  if (len > 0) {
+    mqtt.publish(T_SYS_STATE, buf, true);
+  }
+}
+
+void applyRelayStates(bool publishState = true) {
+  if (emergencyStopActive) {
+    // Emergency stop overrides all other control paths
+    if (relayPumpA_out || relayPumpB_out || relayPumpPh_out || relayMainPump_out || relaySolenoid1_out) {
+      writeRelay(RELAY_PUMP_A, false);
+      writeRelay(RELAY_PUMP_B, false);
+      writeRelay(RELAY_PUMP_PH, false);
+      writeRelay(RELAY_MAIN_PUMP, false);
+      writeRelay(RELAY_SOLENOID_1, false);
+      relayPumpA_out = relayPumpB_out = relayPumpPh_out = relayMainPump_out = relaySolenoid1_out = false;
+      if (publishState) {
+        sendPumpState("pumpA", false);
+        sendPumpState("pumpB", false);
+        sendPumpState("pumpPh", false);
+        sendPumpState("mainPump", false);
+        publishSystemState();
+      }
+    }
+    return;
+  }
+
+  bool stateChanged = false;
+
+  if (pumpA_on != relayPumpA_out) {
+    writeRelay(RELAY_PUMP_A, pumpA_on);
+    relayPumpA_out = pumpA_on;
+    stateChanged = true;
+    if (publishState) sendPumpState("pumpA", pumpA_on);
+  }
+  if (pumpB_on != relayPumpB_out) {
+    writeRelay(RELAY_PUMP_B, pumpB_on);
+    relayPumpB_out = pumpB_on;
+    stateChanged = true;
+    if (publishState) sendPumpState("pumpB", pumpB_on);
+  }
+  if (pumpPh_on != relayPumpPh_out) {
+    writeRelay(RELAY_PUMP_PH, pumpPh_on);
+    relayPumpPh_out = pumpPh_on;
+    stateChanged = true;
+    if (publishState) sendPumpState("pumpPh", pumpPh_on);
+  }
+  if (mainPump_on != relayMainPump_out) {
+    writeRelay(RELAY_MAIN_PUMP, mainPump_on);
+    relayMainPump_out = mainPump_on;
+    stateChanged = true;
+    if (publishState) sendPumpState("mainPump", mainPump_on);
+  }
+  if (solenoid1_on != relaySolenoid1_out) {
+    writeRelay(RELAY_SOLENOID_1, solenoid1_on);
+    relaySolenoid1_out = solenoid1_on;
+    stateChanged = true;
+    // solenoid state is tied to mainPump, so no topic publish here
+  }
+
+  if (publishState && stateChanged) {
+    publishSystemState();
+  }
+}
+
 void forceRelaysOff() {
+  // Force all relays off immediately (used during startup or in emergency conditions)
   writeRelay(RELAY_PUMP_A, false);
   writeRelay(RELAY_PUMP_B, false);
   writeRelay(RELAY_PUMP_PH, false);
   writeRelay(RELAY_MAIN_PUMP, false);
   writeRelay(RELAY_SOLENOID_1, false);
+
+  relayPumpA_out = relayPumpB_out = relayPumpPh_out = relayMainPump_out = relaySolenoid1_out = false;
 }
 
 void setMainFlow(bool on, bool publishState = true) {
   mainPump_on = on;
   solenoid1_on = on;
-  writeRelay(RELAY_MAIN_PUMP, mainPump_on);
-  writeRelay(RELAY_SOLENOID_1, solenoid1_on);
-  if (publishState) {
-    sendPumpState("mainPump", mainPump_on);
-  }
+  applyRelayStates(publishState);
 }
 
 const char* getStageName() {
@@ -347,9 +453,31 @@ float readWaterLevel() {
   return constrain(level, 0.0f, 100.0f);
 }
 
+static float computeAverage(const float* samples, int count) {
+  if (count <= 0) return 0.0f;
+  float sum = 0.0f;
+  for (int i = 0; i < count; i++) {
+    sum += samples[i];
+  }
+  return sum / count;
+}
+
 void updateSensors() {
-  phValue = readPH();
-  ecValue = readEC();
+  // Take raw readings, then smooth over a sliding window to reduce jitter.
+  float newPh = readPH();
+  float newEc = readEC();
+
+  phSamples[phSampleIndex] = newPh;
+  phSampleIndex = (phSampleIndex + 1) % SENSOR_SMOOTH_SAMPLES;
+  if (phSampleCount < SENSOR_SMOOTH_SAMPLES) phSampleCount++;
+
+  ecSamples[ecSampleIndex] = newEc;
+  ecSampleIndex = (ecSampleIndex + 1) % SENSOR_SMOOTH_SAMPLES;
+  if (ecSampleCount < SENSOR_SMOOTH_SAMPLES) ecSampleCount++;
+
+  phValue = computeAverage(phSamples, phSampleCount);
+  ecValue = computeAverage(ecSamples, ecSampleCount);
+
   waterLevel = readWaterLevel();
 }
 
@@ -409,14 +537,7 @@ void stopAllPumps(bool publishState) {
   solenoid1_on = false;
   autoState = DOSING_IDLE;
 
-  forceRelaysOff();
-
-  if (publishState) {
-    sendPumpState("pumpA", false);
-    sendPumpState("pumpB", false);
-    sendPumpState("pumpPh", false);
-    sendPumpState("mainPump", false);
-  }
+  applyRelayStates(publishState);
 }
 
 void handleHardwareButtons(unsigned long nowMs) {
@@ -428,14 +549,17 @@ void handleHardwareButtons(unsigned long nowMs) {
   if (estopNow) {
     if (!emergencyStopActive) {
       emergencyStopActive = true;
+      manualOverride = false;
       autoMode = false;
       stopAllPumps(true);
       if (mqtt.connected()) {
         mqtt.publish(T_SYS_AUTO, "0");
         mqtt.publish(T_SYS_STATUS, "hardware_estop", false);
       }
+      publishSystemState();
       Serial.println("[E-STOP] ACTIVE - all relays OFF");
     } else {
+      // Keep relays forced off while the emergency button is held
       forceRelaysOff();
     }
     return;
@@ -443,12 +567,17 @@ void handleHardwareButtons(unsigned long nowMs) {
 
   if (emergencyStopActive) {
     emergencyStopActive = false;
+    manualOverride = false;
+    publishSystemState();
     Serial.println("[E-STOP] Released");
   }
 
   if (btnMain.pressedEvent) {
+    manualOverride = true;
+    autoMode = false;
     bool next = !mainPump_on;
     setMainFlow(next, true);
+    publishSystemState();
     Serial.printf("[Button] Main flow %s\n", next ? "ON" : "OFF");
   }
 
@@ -471,6 +600,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   if (strcmp(topic, T_SYS_EMERGENCY) == 0) {
     // Just stop everything normally (don't flag hardware emergencyStopActive or it will fight the physical button)
+    manualOverride = false;
     autoMode = false;
     dailyScheduleActive = false; // Override the daily loop
     stopAllPumps(true);
@@ -484,24 +614,29 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   if (strcmp(topic, T_PUMP_A) == 0) {
     bool on = (msg[0] == '1');
+    manualOverride = true;
+    autoMode = false;
     pumpA_on = on;
-    writeRelay(RELAY_PUMP_A, pumpA_on);
-    sendPumpState("pumpA", pumpA_on);
-    if (autoMode) { autoMode = false; sendSensorData(); } // Break out of auto if manual override
+    applyRelayStates(true);
+    sendSensorData(); // keep UI in sync
   } else if (strcmp(topic, T_PUMP_B) == 0) {
     bool on = (msg[0] == '1');
+    manualOverride = true;
+    autoMode = false;
     pumpB_on = on;
-    writeRelay(RELAY_PUMP_B, pumpB_on);
-    sendPumpState("pumpB", pumpB_on);
-    if (autoMode) { autoMode = false; sendSensorData(); }
+    applyRelayStates(true);
+    sendSensorData();
   } else if (strcmp(topic, T_PUMP_PH) == 0) {
     bool on = (msg[0] == '1');
+    manualOverride = true;
+    autoMode = false;
     pumpPh_on = on;
-    writeRelay(RELAY_PUMP_PH, pumpPh_on);
-    sendPumpState("pumpPh", pumpPh_on);
-    if (autoMode) { autoMode = false; sendSensorData(); }
+    applyRelayStates(true);
+    sendSensorData();
   } else if (strcmp(topic, T_PUMP_MAIN) == 0) {
     bool on = (msg[0] == '1');
+    manualOverride = true;
+    autoMode = false;
     setMainFlow(on, true);
   } else if (strcmp(topic, T_CTRL_EC) == 0) {
     targetEc = atof(msg);
@@ -513,10 +648,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     bool newAuto = (msg[0] == '1');
     if (autoMode != newAuto) {
       autoMode = newAuto;
+      manualOverride = false;
       autoState = DOSING_IDLE;
       if (!autoMode) {
         stopAllPumps(true);
       }
+      publishSystemState();
     }
   } else if (strcmp(topic, T_CTRL_CALIBRATE) == 0) {
     handleCalibration(msg);
@@ -583,6 +720,7 @@ void reconnectMQTT() {
     mqtt.subscribe(T_SYS_EMERGENCY);
     mqtt.subscribe(T_CTRL_CALIBRATE);
     sendSensorData();
+    publishSystemState();
   }
 }
 
@@ -611,83 +749,86 @@ void sendSensorData() {
 }
 
 void processAutoMode() {
-  if (!autoMode || emergencyStopActive) {
+  if (!autoMode || emergencyStopActive || manualOverride) {
     return;
   }
 
-  unsigned long elapsed = millis() - dosingStateStartTime;
+  unsigned long now = millis();
 
   switch (autoState) {
     case DOSING_IDLE:
       if (ecValue < targetEc - EC_TOLERANCE) {
+        // Start nutrient dosing sequence: Pump A first, then after a delay start Pump B.
         autoState = DOSING_A;
-        dosingStateStartTime = millis();
+        dosingAStartTime = now;
+        dosingBStartTime = 0;
         pumpA_on = true;
-        writeRelay(RELAY_PUMP_A, true);
-        sendPumpState("pumpA", true);
+        pumpB_on = false;
+        applyRelayStates(true);
+        Serial.println("[Auto] EC dosing start: Pump A ON");
       } else if (phValue > targetPh + PH_TOLERANCE) {
         autoState = DOSING_PH;
-        dosingStateStartTime = millis();
+        dosingStateStartTime = now;
         pumpPh_on = true;
-        writeRelay(RELAY_PUMP_PH, true);
-        sendPumpState("pumpPh", true);
+        applyRelayStates(true);
+        Serial.println("[Auto] pH dosing start: Pump PH ON");
       } else {
         // Safe defaults when resting
         if (pumpA_on || pumpB_on || pumpPh_on) {
           stopAllPumps(true);
-          autoMode = true; // prevent stopAllPumps from breaking overall UI toggle expectation
+          // autoMode remains true; just ensure the pumps are off
         }
       }
       break;
 
     case DOSING_A:
-      if (elapsed >= PUMP_DOSE_MS) {
-        pumpA_on = false;
-        writeRelay(RELAY_PUMP_A, false);
-        sendPumpState("pumpA", false);
-        autoState = DOSING_WAIT_B;
-        dosingStateStartTime = millis();
-      }
-      break;
-
-    case DOSING_WAIT_B:
-      if (elapsed >= PUMP_B_DELAY) {
-        pumpB_on = true;
-        writeRelay(RELAY_PUMP_B, true);
-        sendPumpState("pumpB", true);
+      if (now - dosingAStartTime >= PUMP_B_DELAY) {
         autoState = DOSING_B;
-        dosingStateStartTime = millis();
+        dosingBStartTime = now;
+        pumpB_on = true;
+        applyRelayStates(true);
+        Serial.println("[Auto] EC dosing: Pump B ON");
       }
       break;
 
     case DOSING_B:
-      if (elapsed >= PUMP_DOSE_MS) {
+      // Turn off Pump A after it had time to run alongside Pump B
+      if (pumpA_on && (now - dosingAStartTime >= PUMP_B_DELAY + PUMP_DOSE_MS)) {
+        pumpA_on = false;
+        applyRelayStates(true);
+        Serial.println("[Auto] EC dosing: Pump A OFF");
+      }
+
+      if (pumpB_on && (now - dosingBStartTime >= PUMP_DOSE_MS)) {
         pumpB_on = false;
-        writeRelay(RELAY_PUMP_B, false);
-        sendPumpState("pumpB", false);
+        applyRelayStates(true);
+        Serial.println("[Auto] EC dosing: Pump B OFF");
+      }
+
+      if (!pumpA_on && !pumpB_on) {
         autoState = DOSING_MIX_EC;
-        dosingStateStartTime = millis();
+        dosingStateStartTime = now;
+        Serial.println("[Auto] EC dosing: Mixing");
       }
       break;
 
     case DOSING_MIX_EC:
-      if (elapsed >= PUMP_MIXING_MS) {
+      if (now - dosingStateStartTime >= PUMP_MIXING_MS) {
         autoState = DOSING_IDLE;
       }
       break;
 
     case DOSING_PH:
-      if (elapsed >= PH_DOSE_MS) {
+      if (now - dosingStateStartTime >= PH_DOSE_MS) {
         pumpPh_on = false;
-        writeRelay(RELAY_PUMP_PH, false);
-        sendPumpState("pumpPh", false);
+        applyRelayStates(true);
         autoState = DOSING_MIX_PH;
-        dosingStateStartTime = millis();
+        dosingStateStartTime = now;
       }
       break;
 
     case DOSING_MIX_PH:
-      if (elapsed >= PH_MIXING_MS) {
+      if (now - dosingStateStartTime >= PH_MIXING_MS) {
         autoState = DOSING_IDLE;
       }
       break;
@@ -704,7 +845,9 @@ void processDailySchedule() {
     if (!dailyScheduleActive) {
       dailyScheduleActive = true;
       dailyMixingDone = false;
-      autoMode = true; 
+      if (!manualOverride) {
+        autoMode = true;
+      }
       sendSensorData();
       Serial.println("[Schedule] 08:00 -> Phase 1: Mixing");
     }
