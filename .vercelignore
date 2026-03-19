@@ -3,4 +3,3 @@ project_esp32_tomato_hydroponics/
 .github/
 *.ino
 *.md
-cloud_version_web.html

@@ -1,630 +1,771 @@
 /*
-  🍅 Tomato Hydroponics Controller - ESP32
-  EC/pH + Pump Control with Growth Stage Presets
-  /อ่านก่อน ultrasonic เราก็ต้องแก้ระยะใหม่ด้วยเพราะตัดโครงออกไปส่วนนึง
-  /lcd ยังไม่ได้เชื่อมเพราะว่าจะเทสระบบกับเว็บก่อน
-  //ปุ่มยังไม่ได้ใส่หรือต่อเพราะว่ายังวางระบบไม่ได้ว่าจะบังคับอะไรบ้างแบบmanual
+  Tomato Hydroponics Controller - ESP32
+  Refactored for:
+  - 3 hardware buttons (GPIO16, GPIO17, GPIO4 NC)
+  - 4CH relay + 1CH relay mapping
+  - LCD 12864 real-time status
+  - Non-blocking control flow with millis()
 */
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
-#include <ArduinoJson.h>
 #include <EEPROM.h>
-#include <U8g2lib.h>          // LCD ST7920
-//#include <esp_wifi.h>
-//#include "esp_eap_client.h"  // WPA2-Enterprise (eduroam) — Core 3.x
-//#include <WebServer.h>
-//#include <WebSocketsServer.h> libraryเดิมที่เชื่อมกับ websocket
+#include <U8g2lib.h>
+#include <math.h>
+#include <string.h>
 
 // ---- Sensor Pins ----
-#define PH_PIN            35        // GPIO35 (ADC1_CH7) — pH sensor
-#define EC_PIN            34        // GPIO34 (ADC1_CH6) — EC sensor (DFR0300)
-#define SAMPLES           20        // ADC averaging samples
+#define PH_PIN            35
+#define EC_PIN            34
+#define SAMPLES           20
 
 // ---- Ultrasonic HC-SR04 ----
-#define TRIG_PIN          25        // GPIO25 — Trigger
-#define ECHO_PIN          26        // GPIO26 — Echo (ใช้ HC-SR04P 3.3V!)
-#define WATER_FULL_DIST   20.0    // cm จาก sensor → ผิวน้ำเมื่อเต็ม (100%)
-#define WATER_EMPTY_DIST  42.0    // cm จาก sensor → ผิวน้ำเมื่อถังว่าง (0%)
+#define TRIG_PIN          25
+#define ECHO_PIN          32
+#define WATER_FULL_DIST   20.0f
+#define WATER_EMPTY_DIST  42.0f
 
-// ---- Relays (Active-LOW, Wired NO) ----
-#define RELAY_PUMP_A      13        // Fertilizer A
-#define RELAY_PUMP_B      12        // Fertilizer B
-#define RELAY_MAIN_PUMP   14        // pH Down / Main Pump
+// ---- Relay Pins ----
+// 4CH relay: 13, 12, 14, 26
+// 1CH relay: 27
+#define RELAY_PUMP_A      13
+#define RELAY_PUMP_B      12
+#define RELAY_PUMP_PH     14
+#define RELAY_SOLENOID_1  26
+#define RELAY_MAIN_PUMP   27
+const bool RELAY_ACTIVE_HIGH = true;
 
-// ---- LCD ST7920 128x64 (SPI) ----
-// Wiring: VCC=Vin(5V), BLA=3.3V, BLK=GND, R6=GND
-#define LCD_CLK           18        // GPIO18 — E (SCLK)
-#define LCD_DATA          23        // GPIO23 — R/W (SID)
-#define LCD_CS            5         // GPIO5  — RS (CS)
-#define LCD_RST           22        // GPIO22 — RST
+// ---- Buttons ----
+#define BTN_MAIN_PIN      16   // NO: main pump + solenoid toggle
+#define BTN_STAGE_PIN     17   // NO: growth-stage toggle
+#define BTN_ESTOP_PIN      4   // NC: emergency stop (active HIGH with INPUT_PULLUP)
+#define BTN_DEBOUNCE_MS   50
 
+// ---- LCD ST7920 128x64 ----
+#define LCD_CLK           18
+#define LCD_DATA          23
+#define LCD_CS            5
+#define LCD_RST           22
 U8G2_ST7920_128X64_F_SW_SPI u8g2(U8G2_R0, LCD_CLK, LCD_DATA, LCD_CS, LCD_RST);
 
-// ---- Auto Dosing Button (momentary push, wired to GND) ----
-#define BTN_AUTO_PIN      32        // GPIO32 — INPUT_PULLUP
-#define BTN_DEBOUNCE_MS   50        // debounce time (ms)
-
-// ---- pH EEPROM (address 0x00-0x08) ----
+// ---- pH EEPROM ----
 #define PH_ADDR_SLOPE     0
 #define PH_ADDR_INTERCEPT 4
 #define PH_ADDR_VALID     8
 #define PH_VALID_MAGIC    0xAB
 
-// ---- EC EEPROM (address 0x0A-0x12) ----
+// ---- EC EEPROM ----
 #define EC_KVALUEADDR     0x0A
 #define EC_ADDR_VALID     0x12
 #define EC_VALID_MAGIC    0xEC
-#define RES2              820.0
-#define ECREF             200.0
-#define VREF              3300.0    // 3.3V = 3300mV
-#define ADC_RES           4095.0    // ESP32 12-bit
-#define EC_DEFAULT_TEMP   25.0
+#define RES2              820.0f
+#define ECREF             200.0f
+#define VREF              3300.0f
+#define ADC_RES           4095.0f
+#define EC_DEFAULT_TEMP   25.0f
 
 // ---- WiFi ----
 const char* WIFI_SSID = "Yumgaizap";
 const char* WIFI_PASS = "0625321533";
 
-// ---- MQTT (HiveMQ Cloud Private Broker) ----
+// ---- MQTT ----
 const char* MQTT_SERVER = "8218cf51f5de4ac5a776aa0efb931888.s1.eu.hivemq.cloud";
 const int MQTT_PORT = 8883;
 const char* MQTT_USER = "tomato-esp32";
 const char* MQTT_PASS = "tomato_project_Y3";
 
-// ---- MQTT Topics (per-sensor cloud architecture) ----
-// Publish (ESP32 → Cloud)
-const char* T_SENSOR_EC    = "hydroponics/sensor/ec";
-const char* T_SENSOR_PH    = "hydroponics/sensor/ph";
-const char* T_SENSOR_WATER = "hydroponics/sensor/water";
-const char* T_PUMP_A       = "hydroponics/pump/a";
-const char* T_PUMP_B       = "hydroponics/pump/b";
-const char* T_PUMP_PH      = "hydroponics/pump/ph";
-const char* T_PUMP_MAIN    = "hydroponics/pump/main";
-const char* T_SYS_STATUS   = "hydroponics/system/status";
-const char* T_SYS_AUTO     = "hydroponics/system/auto";
-// Subscribe (Cloud → ESP32)
-const char* T_CTRL_EC      = "hydroponics/control/ec_target";
-const char* T_CTRL_PH      = "hydroponics/control/ph_target";
+// Publish topics
+const char* T_SENSOR_EC     = "hydroponics/sensor/ec";
+const char* T_SENSOR_PH     = "hydroponics/sensor/ph";
+const char* T_SENSOR_WATER  = "hydroponics/sensor/water";
+const char* T_PUMP_A        = "hydroponics/pump/a";
+const char* T_PUMP_B        = "hydroponics/pump/b";
+const char* T_PUMP_PH       = "hydroponics/pump/ph";
+const char* T_PUMP_MAIN     = "hydroponics/pump/main";
+const char* T_SYS_STATUS    = "hydroponics/system/status";
+const char* T_SYS_AUTO      = "hydroponics/system/auto";
+
+// Subscribe topics
+const char* T_CTRL_EC       = "hydroponics/control/ec_target";
+const char* T_CTRL_PH       = "hydroponics/control/ph_target";
 const char* T_SYS_EMERGENCY = "hydroponics/system/emergency";
 const char* T_CTRL_CALIBRATE = "hydroponics/control/calibrate";
 
 WiFiClientSecure espClient;
 PubSubClient mqtt(espClient);
 
-bool pumpA_on = false, pumpB_on = false, mainPump_on = false;
-float targetEc = 2.0, targetPh = 6.2, ecValue = 0.0, phValue = 0.0;
-float waterLevel = 0.0;   // ระดับน้ำ (%)
+// ---- Runtime State ----
+bool pumpA_on = false;
+bool pumpB_on = false;
+bool pumpPh_on = false;
+bool mainPump_on = false;
+bool solenoid1_on = false;
+
+float targetEc = 2.0f;
+float targetPh = 6.2f;
+float ecValue = 0.0f;
+float phValue = 0.0f;
+float waterLevel = 0.0f;
+
 unsigned long lastDataSend = 0;
 const unsigned long DATA_INTERVAL = 2000;
+unsigned long lastLcdUpdate = 0;
+const unsigned long LCD_UPDATE_INTERVAL = 250;
+unsigned long lastMqttReconnectAttempt = 0;
+const unsigned long MQTT_RECONNECT_INTERVAL = 3000;
+unsigned long lastWifiReconnectAttempt = 0;
+const unsigned long WIFI_RECONNECT_INTERVAL = 5000;
+unsigned long lastWifiLog = 0;
+const unsigned long WIFI_LOG_INTERVAL = 1500;
 
-// ---- Non-blocking Pump B delay ----
-bool waitingForPumpB = false;
-unsigned long pumpBStartTime = 0;
-const unsigned long PUMP_B_DELAY = 2000; // 2 seconds
+// ---- Auto dosing ----
+bool autoMode = false;
+const float EC_TOLERANCE = 0.05f;
+const float PH_TOLERANCE = 0.05f;
 
-// ---- pH Calibration ----
-float phSlope     = -0.004593f;   // default: -5.70 * (3.3/4095)
-float phIntercept = 21.00f;
+enum AutoState { DOSING_IDLE, DOSING_A, DOSING_WAIT_B, DOSING_B, DOSING_MIX_EC, DOSING_PH, DOSING_MIX_PH };
+AutoState autoState = DOSING_IDLE;
+unsigned long dosingStateStartTime = 0;
 
-// ---- EC Calibration ----
-float ecKvalueLow  = 1.0f;
+const unsigned long PUMP_DOSE_MS = 2000;        // Dose for 2s
+const unsigned long PUMP_B_DELAY = 2000;        // Wait 2s before A -> B
+const unsigned long PUMP_MIXING_MS = 30000;     // Mix for 30s before reading again
+const unsigned long PH_DOSE_MS = 1500;          // Dose pH for 1.5s
+const unsigned long PH_MIXING_MS = 20000;       // Mix pH for 20s
+
+// ---- Emergency ----
+bool emergencyStopActive = false;
+
+// ---- Calibration ----
+float phSlope = -0.004593f;
+float phIntercept = 21.0f;
+float ecKvalueLow = 1.0f;
 float ecKvalueHigh = 1.0f;
-float ecKvalue     = 1.0f;
+float ecKvalue = 1.0f;
 float ecTemperature = EC_DEFAULT_TEMP;
 
-// ---- WiFi / MQTT reconnect timing ----
-const unsigned long WIFI_CONNECT_TIMEOUT = 10000;      // ms
-const unsigned long MQTT_RECONNECT_INTERVAL = 3000;    // ms
-unsigned long lastMqttReconnectAttempt = 0;
+// ---- Growth Stage ----
+struct GrowthStage {
+  const char* name;
+  float ecTarget;
+  float phTarget;
+};
 
-// ---- Auto dosing state ----
-bool autoMode = false;
-unsigned long ecStableSince = 0;
+GrowthStage growthStages[] = {
+  {"Seedling",   1.20f, 6.20f},
+  {"Vegetative", 1.80f, 6.00f},
+  {"Flowering",  2.30f, 5.80f},
+  {"Ripening",   2.00f, 6.10f}
+};
 
-// ---- Button debounce state ----
-bool btnLastState = HIGH;           // INPUT_PULLUP → idle = HIGH
-bool btnStableState = HIGH;
-unsigned long btnLastDebounceTime = 0;
-const float EC_TOLERANCE = 0.05f;
-const unsigned long EC_STABLE_TIME = 10000; // ms
+const int GROWTH_STAGE_COUNT = sizeof(growthStages) / sizeof(growthStages[0]);
+int activeStageIndex = 0; // -1 means custom target
 
+// ---- Debounced Button ----
+struct DebouncedButton {
+  uint8_t pin;
+  bool activeLow;
+  bool stableState;
+  bool lastReading;
+  unsigned long lastDebounceTime;
+  bool pressedEvent;
+};
+
+DebouncedButton btnMain  = {BTN_MAIN_PIN, true,  HIGH, HIGH, 0, false};
+DebouncedButton btnStage = {BTN_STAGE_PIN, true, HIGH, HIGH, 0, false};
+DebouncedButton btnEstop = {BTN_ESTOP_PIN, false, HIGH, HIGH, 0, false};
+
+// ---- Forward declarations ----
 void sendSensorData();
 void sendPumpState(const char* pump, bool state);
-void handleCalibration(char* cmd);
 void reconnectMQTT();
-void stopAllPumps();
+void stopAllPumps(bool publishState = true);
+void updateSensors();
+void updateLCD();
+void processAutoMode();
+void handleCalibration(const char* cmd);
 
-// ============================================================
-//  EEPROM: Load Calibration Values
-// ============================================================
-void loadPhCalibration() {
-    if (EEPROM.read(PH_ADDR_VALID) == PH_VALID_MAGIC) {
-        EEPROM.get(PH_ADDR_SLOPE, phSlope);
-        EEPROM.get(PH_ADDR_INTERCEPT, phIntercept);
-        Serial.printf("🍅 pH calibration loaded: slope=%.6f intercept=%.4f\n", phSlope, phIntercept);
-    } else {
-        Serial.println("🍅 pH: no calibration found, using defaults");
+void writeRelay(uint8_t relayPin, bool on) {
+  if (RELAY_ACTIVE_HIGH) {
+    digitalWrite(relayPin, on ? HIGH : LOW);
+  } else {
+    digitalWrite(relayPin, on ? LOW : HIGH);
+  }
+}
+
+void forceRelaysOff() {
+  writeRelay(RELAY_PUMP_A, false);
+  writeRelay(RELAY_PUMP_B, false);
+  writeRelay(RELAY_PUMP_PH, false);
+  writeRelay(RELAY_MAIN_PUMP, false);
+  writeRelay(RELAY_SOLENOID_1, false);
+}
+
+void setMainFlow(bool on, bool publishState = true) {
+  mainPump_on = on;
+  solenoid1_on = on;
+  writeRelay(RELAY_MAIN_PUMP, mainPump_on);
+  writeRelay(RELAY_SOLENOID_1, solenoid1_on);
+  if (publishState) {
+    sendPumpState("mainPump", mainPump_on);
+  }
+}
+
+const char* getStageName() {
+  if (activeStageIndex >= 0 && activeStageIndex < GROWTH_STAGE_COUNT) {
+    return growthStages[activeStageIndex].name;
+  }
+  return "Custom";
+}
+
+void applyGrowthStage(int nextIndex, bool publishTargets) {
+  if (nextIndex < 0) {
+    nextIndex = 0;
+  }
+  activeStageIndex = nextIndex % GROWTH_STAGE_COUNT;
+  targetEc = growthStages[activeStageIndex].ecTarget;
+  targetPh = growthStages[activeStageIndex].phTarget;
+
+  Serial.printf("[Stage] %s -> EC %.2f, pH %.2f\n", getStageName(), targetEc, targetPh);
+  if (publishTargets) {
+    sendSensorData();
+  }
+}
+
+void initButton(DebouncedButton& b) {
+  pinMode(b.pin, INPUT_PULLUP);
+  b.stableState = digitalRead(b.pin);
+  b.lastReading = b.stableState;
+  b.lastDebounceTime = millis();
+  b.pressedEvent = false;
+}
+
+void updateButton(DebouncedButton& b, unsigned long nowMs) {
+  b.pressedEvent = false;
+  bool reading = digitalRead(b.pin);
+
+  if (reading != b.lastReading) {
+    b.lastDebounceTime = nowMs;
+    b.lastReading = reading;
+  }
+
+  if ((nowMs - b.lastDebounceTime) >= BTN_DEBOUNCE_MS && reading != b.stableState) {
+    b.stableState = reading;
+    bool pressed = b.activeLow ? (b.stableState == LOW) : (b.stableState == HIGH);
+    if (pressed) {
+      b.pressedEvent = true;
     }
+  }
+}
+
+void loadPhCalibration() {
+  if (EEPROM.read(PH_ADDR_VALID) == PH_VALID_MAGIC) {
+    EEPROM.get(PH_ADDR_SLOPE, phSlope);
+    EEPROM.get(PH_ADDR_INTERCEPT, phIntercept);
+    Serial.printf("[pH] Calibration loaded: slope=%.6f intercept=%.4f\n", phSlope, phIntercept);
+  } else {
+    Serial.println("[pH] No calibration found, using defaults");
+  }
 }
 
 void loadEcCalibration() {
-    if (EEPROM.read(EC_ADDR_VALID) == EC_VALID_MAGIC) {
-        EEPROM.get(EC_KVALUEADDR, ecKvalueLow);
-        EEPROM.get(EC_KVALUEADDR + 4, ecKvalueHigh);
-        if (ecKvalueLow < 0.5 || ecKvalueLow > 1.5 || ecKvalueHigh < 0.5 || ecKvalueHigh > 1.5) {
-            ecKvalueLow = 1.0; ecKvalueHigh = 1.0;
-            Serial.println("🍅 EC: calibration out of range, reset to defaults");
-        } else {
-            Serial.printf("🍅 EC calibration loaded: Klow=%.4f Khigh=%.4f\n", ecKvalueLow, ecKvalueHigh);
-        }
-        ecKvalue = ecKvalueLow;
+  if (EEPROM.read(EC_ADDR_VALID) == EC_VALID_MAGIC) {
+    EEPROM.get(EC_KVALUEADDR, ecKvalueLow);
+    EEPROM.get(EC_KVALUEADDR + 4, ecKvalueHigh);
+    if (ecKvalueLow < 0.5f || ecKvalueLow > 1.5f || ecKvalueHigh < 0.5f || ecKvalueHigh > 1.5f) {
+      ecKvalueLow = 1.0f;
+      ecKvalueHigh = 1.0f;
+      Serial.println("[EC] Calibration out of range, reset to defaults");
     } else {
-        Serial.println("🍅 EC: no calibration found, using defaults (K=1.0)");
+      Serial.printf("[EC] Calibration loaded: Klow=%.4f Khigh=%.4f\n", ecKvalueLow, ecKvalueHigh);
     }
+    ecKvalue = ecKvalueLow;
+  } else {
+    Serial.println("[EC] No calibration found, using defaults (K=1.0)");
+  }
 }
 
-// ============================================================
-//  Sensor Reading Functions
-// ============================================================
 float readPH() {
-    long sum = 0;
-    for (int i = 0; i < SAMPLES; i++) {
-        sum += analogRead(PH_PIN);
-        delay(5);
-    }
-    float avg = (float)sum / SAMPLES;
-    float ph = phSlope * avg + phIntercept;
-    return constrain(ph, 0.0f, 14.0f);
+  long sum = 0;
+  for (int i = 0; i < SAMPLES; i++) {
+    sum += analogRead(PH_PIN);
+  }
+  float avg = (float)sum / SAMPLES;
+  float ph = phSlope * avg + phIntercept;
+  return constrain(ph, 0.0f, 14.0f);
 }
 
 float readEC() {
-    long sum = 0;
-    for (int i = 0; i < SAMPLES; i++) {
-        sum += analogRead(EC_PIN);
-        delay(5);
-    }
-    float avg = (float)sum / SAMPLES;
-    float voltage = avg / ADC_RES * VREF;
-    float rawEC = 1000.0 * voltage / RES2 / ECREF;
+  long sum = 0;
+  for (int i = 0; i < SAMPLES; i++) {
+    sum += analogRead(EC_PIN);
+  }
 
-    // Auto-select K value based on EC range
-    if (rawEC * ecKvalue > 2.5)      ecKvalue = ecKvalueHigh;
-    else if (rawEC * ecKvalue < 2.0)  ecKvalue = ecKvalueLow;
+  float avg = (float)sum / SAMPLES;
+  float voltage = avg / ADC_RES * VREF;
+  float rawEC = 1000.0f * voltage / RES2 / ECREF;
 
-    float ec = rawEC * ecKvalue;
-    // Temperature compensation
-    ec = ec / (1.0 + 0.0185 * (ecTemperature - 25.0));
-    return max(ec, 0.0f);
+  if (rawEC * ecKvalue > 2.5f) {
+    ecKvalue = ecKvalueHigh;
+  } else if (rawEC * ecKvalue < 2.0f) {
+    ecKvalue = ecKvalueLow;
+  }
+
+  float ec = rawEC * ecKvalue;
+  ec = ec / (1.0f + 0.0185f * (ecTemperature - 25.0f));
+  return max(ec, 0.0f);
 }
 
 float readWaterLevelOnce() {
-    // ส่ง pulse 10μs
-    digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(5);
-    digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(TRIG_PIN, LOW);
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(5);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
 
-    // วัดเวลาที่ ECHO เป็น HIGH (timeout 50ms ≈ ~850cm)
-    long duration = pulseIn(ECHO_PIN, HIGH, 50000);
-    if (duration == 0) return -1.0;  // no echo
+  long duration = pulseIn(ECHO_PIN, HIGH, 50000);
+  if (duration == 0) {
+    return -1.0f;
+  }
 
-    float distance = duration * 0.034 / 2.0;  // cm
-    return distance;
+  return duration * 0.034f / 2.0f;
 }
 
 float readWaterLevel() {
-    // Try 3 times, take first valid reading
-    float distance = -1.0;
-    for (int attempt = 0; attempt < 3; attempt++) {
-        distance = readWaterLevelOnce();
-        if (distance > 0) break;
-        delay(60);  // wait between retries (sensor needs ~60ms between pings)
-    }
+  float distance = readWaterLevelOnce();
+  if (distance < 0) {
+    return waterLevel;
+  }
 
-    if (distance < 0) {
-        Serial.println("🍅 Water: TIMEOUT x3 (no echo! check wiring TRIG=GPIO25 ECHO=GPIO26)");
-        return waterLevel;  // ใช้ค่าเดิม
-    }
-
-    // 10cm = 100%, ยิ่งระยะห่างมาก → น้ำยิ่งน้อย (ลดลงเป็นสัดส่วน)
-    float level = (WATER_EMPTY_DIST - distance) / (WATER_EMPTY_DIST - WATER_FULL_DIST) * 100.0;
-    level = constrain(level, 0.0f, 100.0f);
-    Serial.printf("🍅 Water: dist=%.1fcm level=%.0f%%\n", distance, level);
-    return level;
+  float level = (WATER_EMPTY_DIST - distance) / (WATER_EMPTY_DIST - WATER_FULL_DIST) * 100.0f;
+  return constrain(level, 0.0f, 100.0f);
 }
 
 void updateSensors() {
-    phValue = readPH();
-    ecValue = readEC();
-    waterLevel = readWaterLevel();
+  phValue = readPH();
+  ecValue = readEC();
+  waterLevel = readWaterLevel();
 }
 
-// ============================================================
-//  LCD: แสดง EC, pH, Water Level, Cloud Status, Target EC/pH
-// ============================================================
 void updateLCD() {
-    u8g2.clearBuffer();
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_5x7_tr);
 
-    // ---- Title bar ----
-    u8g2.setFont(u8g2_font_7x14B_tr);
-    u8g2.drawStr(2, 12, "TOMATO HYDRO");
-    u8g2.drawHLine(0, 14, 128);
+  char line[32];
 
-    // ---- Sensor values + Targets ----
-    u8g2.setFont(u8g2_font_6x12_tr);
-    char buf[24];
+  snprintf(line, sizeof(line), "STG:%s A:%d E:%d", getStageName(), autoMode ? 1 : 0, emergencyStopActive ? 1 : 0);
+  u8g2.drawStr(0, 8, line);
 
-    snprintf(buf, sizeof(buf), "EC:%.2f  T:%.1f", ecValue, targetEc);
-    u8g2.drawStr(2, 26, buf);
+  snprintf(line, sizeof(line), "EC %.2f / %.2f", ecValue, targetEc);
+  u8g2.drawStr(0, 18, line);
 
-    snprintf(buf, sizeof(buf), "pH:%.2f  T:%.1f", phValue, targetPh);
-    u8g2.drawStr(2, 38, buf);
+  snprintf(line, sizeof(line), "pH %.2f / %.2f", phValue, targetPh);
+  u8g2.drawStr(0, 28, line);
 
-    // ---- Water level + bar ----
-    int wl = (int)waterLevel;
-    snprintf(buf, sizeof(buf), "H2O:%d%%", wl);
-    u8g2.drawStr(2, 50, buf);
+  snprintf(line, sizeof(line), "R A:%d B:%d PH:%d", pumpA_on ? 1 : 0, pumpB_on ? 1 : 0, pumpPh_on ? 1 : 0);
+  u8g2.drawStr(0, 38, line);
 
-    // Progress bar (right side, same row as H2O)
-    u8g2.drawFrame(56, 42, 68, 8);
-    int barW = (int)(66.0 * waterLevel / 100.0);
-    if (barW > 0) u8g2.drawBox(57, 43, barW, 6);
+  snprintf(line, sizeof(line), "R M:%d S1:%d H2O:%d%%", mainPump_on ? 1 : 0, solenoid1_on ? 1 : 0, (int)waterLevel);
+  u8g2.drawStr(0, 48, line);
 
-    // ---- Cloud Status ----
-    u8g2.drawHLine(0, 53, 128);
-    u8g2.setFont(u8g2_font_5x7_tr);
-    if (mqtt.connected()) {
-        u8g2.drawStr(2, 63, "CLOUD: CONNECTED");
-    } else if (WiFi.status() == WL_CONNECTED) {
-        u8g2.drawStr(2, 63, "WiFi OK | MQTT: ...");
-    } else {
-        u8g2.drawStr(2, 63, "OFFLINE");
-    }
+  snprintf(line, sizeof(line), "WiFi:%s MQTT:%s", WiFi.status() == WL_CONNECTED ? "ON" : "OFF", mqtt.connected() ? "ON" : "OFF");
+  u8g2.drawStr(0, 58, line);
 
-    u8g2.sendBuffer();
+  u8g2.sendBuffer();
 }
 
-// ============================================================
-//  MQTT: Per-Topic Publish & Subscribe
-// ============================================================
 void sendPumpState(const char* pump, bool state) {
-    if (!mqtt.connected()) return;
-    // Map pump name to topic
-    const char* topic = NULL;
-    if (strcmp(pump, "pumpA") == 0)       topic = T_PUMP_A;
-    else if (strcmp(pump, "pumpB") == 0)  topic = T_PUMP_B;
-    else if (strcmp(pump, "pumpPh") == 0) topic = T_PUMP_PH;
-    else if (strcmp(pump, "mainPump") == 0) { topic = T_PUMP_MAIN; mqtt.publish(T_PUMP_PH, state ? "1" : "0"); }
-    if (topic) mqtt.publish(topic, state ? "1" : "0");
-    Serial.printf("🍅 %s: %s\n", pump, state ? "ON" : "OFF");
+  if (!mqtt.connected()) {
+    return;
+  }
+
+  const char* topic = nullptr;
+  if (strcmp(pump, "pumpA") == 0) {
+    topic = T_PUMP_A;
+  } else if (strcmp(pump, "pumpB") == 0) {
+    topic = T_PUMP_B;
+  } else if (strcmp(pump, "pumpPh") == 0) {
+    topic = T_PUMP_PH;
+  } else if (strcmp(pump, "mainPump") == 0) {
+    topic = T_PUMP_MAIN;
+  }
+
+  if (topic != nullptr) {
+    mqtt.publish(topic, state ? "1" : "0");
+  }
+}
+
+void stopAllPumps(bool publishState) {
+  pumpA_on = false;
+  pumpB_on = false;
+  pumpPh_on = false;
+  mainPump_on = false;
+  solenoid1_on = false;
+  autoState = DOSING_IDLE;
+
+  forceRelaysOff();
+
+  if (publishState) {
+    sendPumpState("pumpA", false);
+    sendPumpState("pumpB", false);
+    sendPumpState("pumpPh", false);
+    sendPumpState("mainPump", false);
+  }
+}
+
+void handleHardwareButtons(unsigned long nowMs) {
+  updateButton(btnMain, nowMs);
+  updateButton(btnStage, nowMs);
+  updateButton(btnEstop, nowMs);
+
+  bool estopNow = (btnEstop.stableState == HIGH);
+  if (estopNow) {
+    if (!emergencyStopActive) {
+      emergencyStopActive = true;
+      autoMode = false;
+      stopAllPumps(true);
+      if (mqtt.connected()) {
+        mqtt.publish(T_SYS_AUTO, "0");
+        mqtt.publish(T_SYS_STATUS, "hardware_estop", false);
+      }
+      Serial.println("[E-STOP] ACTIVE - all relays OFF");
+    } else {
+      forceRelaysOff();
+    }
+    return;
+  }
+
+  if (emergencyStopActive) {
+    emergencyStopActive = false;
+    Serial.println("[E-STOP] Released");
+  }
+
+  if (btnMain.pressedEvent) {
+    bool next = !mainPump_on;
+    setMainFlow(next, true);
+    Serial.printf("[Button] Main flow %s\n", next ? "ON" : "OFF");
+  }
+
+  if (btnStage.pressedEvent) {
+    int nextStage = (activeStageIndex < 0) ? 0 : (activeStageIndex + 1) % GROWTH_STAGE_COUNT;
+    applyGrowthStage(nextStage, true);
+  }
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-    char msg[length + 1];
-    for (unsigned int i = 0; i < length; i++) msg[i] = (char)payload[i];
-    msg[length] = '\0';
-    Serial.printf("🍅 [%s]: %s\n", topic, msg);
+  char msg[128];
+  unsigned int copyLen = length;
+  if (copyLen >= sizeof(msg)) {
+    copyLen = sizeof(msg) - 1;
+  }
+  memcpy(msg, payload, copyLen);
+  msg[copyLen] = '\0';
 
-    // ---- Pump control topics (value: "1" or "0") ----
-    if (strcmp(topic, T_PUMP_A) == 0) {
-        bool on = (msg[0] == '1');
-        if (on && ecValue >= targetEc) { Serial.println("🍅 Pump A blocked: EC >= target"); return; }
-        pumpA_on = on;
-        digitalWrite(RELAY_PUMP_A, on ? HIGH : LOW);
-        sendPumpState("pumpA", on);
+  Serial.printf("[MQTT] %s => %s\n", topic, msg);
+
+  if (strcmp(topic, T_SYS_EMERGENCY) == 0) {
+    emergencyStopActive = true;
+    autoMode = false;
+    stopAllPumps(true);
+    mqtt.publish(T_SYS_AUTO, "0");
+    return;
+  }
+
+  if (emergencyStopActive) {
+    return;
+  }
+
+  if (strcmp(topic, T_PUMP_A) == 0) {
+    bool on = (msg[0] == '1');
+    pumpA_on = on;
+    writeRelay(RELAY_PUMP_A, pumpA_on);
+    sendPumpState("pumpA", pumpA_on);
+  } else if (strcmp(topic, T_PUMP_B) == 0) {
+    bool on = (msg[0] == '1');
+    pumpB_on = on;
+    writeRelay(RELAY_PUMP_B, pumpB_on);
+    sendPumpState("pumpB", pumpB_on);
+  } else if (strcmp(topic, T_PUMP_PH) == 0) {
+    bool on = (msg[0] == '1');
+    pumpPh_on = on;
+    writeRelay(RELAY_PUMP_PH, pumpPh_on);
+    sendPumpState("pumpPh", pumpPh_on);
+  } else if (strcmp(topic, T_PUMP_MAIN) == 0) {
+    bool on = (msg[0] == '1');
+    setMainFlow(on, true);
+  } else if (strcmp(topic, T_CTRL_EC) == 0) {
+    targetEc = atof(msg);
+    activeStageIndex = -1;
+  } else if (strcmp(topic, T_CTRL_PH) == 0) {
+    targetPh = atof(msg);
+    activeStageIndex = -1;
+  } else if (strcmp(topic, T_SYS_AUTO) == 0) {
+    autoMode = (msg[0] == '1');
+    autoState = DOSING_IDLE;
+    if (!autoMode) {
+      stopAllPumps(true);
     }
-    else if (strcmp(topic, T_PUMP_B) == 0) {
-        bool on = (msg[0] == '1');
-        if (on && ecValue >= targetEc) { Serial.println("🍅 Pump B blocked: EC >= target"); return; }
-        pumpB_on = on;
-        digitalWrite(RELAY_PUMP_B, on ? HIGH : LOW);
-        sendPumpState("pumpB", on);
-    }
-    else if (strcmp(topic, T_PUMP_MAIN) == 0 || strcmp(topic, T_PUMP_PH) == 0) {
-        bool on = (msg[0] == '1');
-        if (on && phValue <= targetPh) { Serial.println("🍅 Main pump blocked: pH <= target"); return; }
-        mainPump_on = on;
-        digitalWrite(RELAY_MAIN_PUMP, on ? HIGH : LOW);
-        sendPumpState("mainPump", on);
-    }
-    // ---- Target setpoints ----
-    else if (strcmp(topic, T_CTRL_EC) == 0) {
-        targetEc = atof(msg);
-        Serial.printf("🍅 Target EC set to: %.2f\n", targetEc);
-    }
-    else if (strcmp(topic, T_CTRL_PH) == 0) {
-        targetPh = atof(msg);
-        Serial.printf("🍅 Target pH set to: %.2f\n", targetPh);
-    }
-    // ---- System: Auto mode ----
-    else if (strcmp(topic, T_SYS_AUTO) == 0) {
-        bool on = (msg[0] == '1');
-        autoMode = on;
-        ecStableSince = 0;
-        Serial.printf("🍅 Auto mode: %s\n", on ? "ON" : "OFF");
-        if (!on) stopAllPumps();
-    }
-    // ---- System: Emergency stop ----
-    else if (strcmp(topic, T_SYS_EMERGENCY) == 0) {
-        Serial.println("🍅 EMERGENCY STOP!");
-        autoMode = false;
-        stopAllPumps();
-        mqtt.publish(T_SYS_AUTO, "0");
-    }
-    // ---- Calibration commands ----
-    else if (strcmp(topic, T_CTRL_CALIBRATE) == 0) {
-        handleCalibration(msg);
-    }
+  } else if (strcmp(topic, T_CTRL_CALIBRATE) == 0) {
+    handleCalibration(msg);
+  }
 }
 
-void handleCalibration(char* cmd) {
-    // Placeholder: extend with your calibration logic
-    Serial.printf("🍅 Calibration command: %s\n", cmd);
+float getRawADC(int pin) {
+  long sum = 0;
+  for (int i = 0; i < SAMPLES; i++) sum += analogRead(pin);
+  return (float)sum / SAMPLES;
+}
+
+void handleCalibration(const char* cmd) {
+  Serial.printf("[Calibrate] %s\n", cmd);
+  
+  if (strcmp(cmd, "ph_cal_7") == 0) {
+    float avg = getRawADC(PH_PIN);
+    phIntercept = 7.0f - (phSlope * avg);
+    Serial.println("pH 7 Calibrated");
+  } else if (strcmp(cmd, "ph_cal_4") == 0) {
+    float avg = getRawADC(PH_PIN);
+    phSlope = (4.0f - phIntercept) / avg;
+    Serial.println("pH 4 Calibrated");
+  } else if (strcmp(cmd, "ec_cal_low") == 0) {
+    float avg = getRawADC(EC_PIN);
+    float voltage = avg / ADC_RES * VREF;
+    float rawEC = 1000.0f * voltage / RES2 / ECREF;
+    if (rawEC > 0) ecKvalueLow = 1.41f / rawEC;
+    Serial.println("EC Low Calibrated");
+  } else if (strcmp(cmd, "ec_cal_high") == 0) {
+    float avg = getRawADC(EC_PIN);
+    float voltage = avg / ADC_RES * VREF;
+    float rawEC = 1000.0f * voltage / RES2 / ECREF;
+    if (rawEC > 0) ecKvalueHigh = 2.76f / rawEC;
+    Serial.println("EC High Calibrated");
+  } else if (strcmp(cmd, "ph_save") == 0) {
+    EEPROM.put(PH_ADDR_SLOPE, phSlope);
+    EEPROM.put(PH_ADDR_INTERCEPT, phIntercept);
+    EEPROM.write(PH_ADDR_VALID, PH_VALID_MAGIC);
+    EEPROM.commit();
+    Serial.println("pH Saved");
+  } else if (strcmp(cmd, "ec_save") == 0) {
+    EEPROM.put(EC_KVALUEADDR, ecKvalueLow);
+    EEPROM.put(EC_KVALUEADDR + 4, ecKvalueHigh);
+    EEPROM.write(EC_ADDR_VALID, EC_VALID_MAGIC);
+    EEPROM.commit();
+    Serial.println("EC Saved");
+  }
 }
 
 void reconnectMQTT() {
-    Serial.print("🍅 Attempting MQTT connection...");
-    String clientId = "ESP32Client-Tomato-";
-    clientId += String(random(0xffff), HEX);
+  String clientId = "ESP32Client-Tomato-";
+  clientId += String(random(0xffff), HEX);
 
-    if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS, T_SYS_STATUS, 1, true, "offline")) {
-        Serial.println("connected to HiveMQ Cloud!");
-        mqtt.publish(T_SYS_STATUS, "online", true);
-
-        // Subscribe to all control & pump topics
-        mqtt.subscribe(T_PUMP_A);
-        mqtt.subscribe(T_PUMP_B);
-        mqtt.subscribe(T_PUMP_PH);
-        mqtt.subscribe(T_PUMP_MAIN);
-        mqtt.subscribe(T_CTRL_EC);
-        mqtt.subscribe(T_CTRL_PH);
-        mqtt.subscribe(T_SYS_AUTO);
-        mqtt.subscribe(T_SYS_EMERGENCY);
-        mqtt.subscribe(T_CTRL_CALIBRATE);
-        Serial.println("🍅 Subscribed to all control topics");
-    } else {
-        int rc = mqtt.state();
-        Serial.printf("failed, rc=%d ", rc);
-        if (rc == -2) Serial.println("(TLS/TCP failed)");
-        else if (rc == -4) Serial.println("(timeout)");
-        else if (rc == 4) Serial.println("(bad credentials)");
-        else if (rc == 5) Serial.println("(unauthorized)");
-        else Serial.println("(will retry)");
-    }
+  if (mqtt.connect(clientId.c_str(), MQTT_USER, MQTT_PASS, T_SYS_STATUS, 1, true, "offline")) {
+    mqtt.publish(T_SYS_STATUS, "online", true);
+    mqtt.subscribe(T_PUMP_A);
+    mqtt.subscribe(T_PUMP_B);
+    mqtt.subscribe(T_PUMP_PH);
+    mqtt.subscribe(T_PUMP_MAIN);
+    mqtt.subscribe(T_CTRL_EC);
+    mqtt.subscribe(T_CTRL_PH);
+    mqtt.subscribe(T_SYS_AUTO);
+    mqtt.subscribe(T_SYS_EMERGENCY);
+    mqtt.subscribe(T_CTRL_CALIBRATE);
+    sendSensorData();
+  }
 }
 
 void sendSensorData() {
-    if (!mqtt.connected()) return;
-    // Publish each sensor to its own topic
-    char buf[16];
-    dtostrf(ecValue, 1, 2, buf);
-    mqtt.publish(T_SENSOR_EC, buf);
+  if (!mqtt.connected()) {
+    return;
+  }
 
-    dtostrf(phValue, 1, 2, buf);
-    mqtt.publish(T_SENSOR_PH, buf);
+  char buf[16];
+  dtostrf(ecValue, 1, 2, buf);
+  mqtt.publish(T_SENSOR_EC, buf);
 
-    dtostrf(waterLevel, 1, 1, buf);
-    mqtt.publish(T_SENSOR_WATER, buf);
+  dtostrf(phValue, 1, 2, buf);
+  mqtt.publish(T_SENSOR_PH, buf);
 
-    // Publish current targets + auto mode state
-    dtostrf(targetEc, 1, 2, buf);
-    mqtt.publish(T_CTRL_EC, buf);
+  dtostrf(waterLevel, 1, 1, buf);
+  mqtt.publish(T_SENSOR_WATER, buf);
 
-    dtostrf(targetPh, 1, 2, buf);
-    mqtt.publish(T_CTRL_PH, buf);
+  dtostrf(targetEc, 1, 2, buf);
+  mqtt.publish(T_CTRL_EC, buf);
 
-    mqtt.publish(T_SYS_AUTO, autoMode ? "1" : "0");
-}
+  dtostrf(targetPh, 1, 2, buf);
+  mqtt.publish(T_CTRL_PH, buf);
 
-// ============================================================
-//  SETUP & LOOP
-// ============================================================
-void setup() {
-    Serial.begin(115200);
-    Serial.println("\n🍅 Tomato Hydroponics Controller - CLOUD EDITION");
-
-    // ---- EEPROM + ADC init ----
-    EEPROM.begin(32);
-    analogReadResolution(12);
-    analogSetAttenuation(ADC_11db);
-    loadPhCalibration();
-    loadEcCalibration();
-    
-    // ---- Relays Init (Active-HIGH) ----
-    digitalWrite(RELAY_PUMP_A, LOW);
-    pinMode(RELAY_PUMP_A, OUTPUT);
-    digitalWrite(RELAY_PUMP_B, LOW);
-    pinMode(RELAY_PUMP_B, OUTPUT);
-    digitalWrite(RELAY_MAIN_PUMP, LOW);
-    pinMode(RELAY_MAIN_PUMP, OUTPUT);
-
-    // ---- Ultrasonic HC-SR04 ----
-    pinMode(TRIG_PIN, OUTPUT);
-    pinMode(ECHO_PIN, INPUT);
-
-    // ---- Auto Dosing Button ----
-    pinMode(BTN_AUTO_PIN, INPUT_PULLUP);
-
-    // ---- Ultrasonic self-test (before WiFi) ----
-    Serial.println("🍅 Ultrasonic test (3 reads before WiFi):");
-    for (int i = 0; i < 3; i++) {
-        float d = readWaterLevelOnce();
-        if (d > 0) Serial.printf("  [%d] dist=%.1f cm  OK\n", i+1, d);
-        else       Serial.printf("  [%d] NO ECHO - check wiring!\n", i+1);
-        delay(100);
-    }
-
-    // ---- LCD init (matched from working demo) ----
-    u8g2.begin();
-    u8g2.setPowerSave(0);       // ensure display is ON
-    delay(150);                 // ST7920 needs time after power-on
-    u8g2.setDrawColor(1);       // foreground color
-    u8g2.setFontDirection(0);   // left-to-right
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_7x14B_tr);
-    u8g2.drawStr(10, 35, "TOMATO CLOUD");
-    u8g2.setFont(u8g2_font_5x7_tr);
-    u8g2.drawStr(20, 50, "Connecting Wi-Fi");
-    u8g2.sendBuffer();
-
-    // ---- WiFi ----
-    WiFi.disconnect(true);
-    delay(300);
-    WiFi.mode(WIFI_STA);
-    Serial.printf("🍅 Connecting to %s ", WIFI_SSID);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-
-    unsigned long wifiStart = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < WIFI_CONNECT_TIMEOUT) {
-        delay(200);
-        Serial.print(".");
-    }
-
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("\n🍅 WiFi connect failed (timeout). Restarting...");
-        delay(1000);
-        ESP.restart();
-    }
-
-    Serial.println(" OK!");
-    Serial.printf("🍅 IP: %s\n", WiFi.localIP().toString().c_str());
-
-    // ---- MQTT Init ----
-    espClient.setInsecure();                // skip cert verification
-    espClient.setHandshakeTimeout(5);       // 5 sec TLS timeout
-    mqtt.setServer(MQTT_SERVER, MQTT_PORT);
-    mqtt.setBufferSize(512);                // default 256 is too small
-    mqtt.setCallback(mqttCallback);
-
-    Serial.println("🍅 Ready to connect to HiveMQ Cloud!");
-}
-
-void loop() {
-    if (WiFi.status() != WL_CONNECTED) {
-        // Handle WiFi Disconnect
-        Serial.println("WiFi Disconnected. Waiting for reconnection...");
-        delay(1000);
-        return;
-    }
-
-    if (!mqtt.connected()) {
-        if (millis() - lastMqttReconnectAttempt > MQTT_RECONNECT_INTERVAL) {
-            lastMqttReconnectAttempt = millis();
-            reconnectMQTT();
-        }
-    } else {
-        mqtt.loop();
-    }
-
-    // เช็ค Timer เปิดปั๊ม B (ไม่ Block)
-    if (waitingForPumpB && millis() - pumpBStartTime >= PUMP_B_DELAY) {
-        waitingForPumpB = false;
-        pumpB_on = true;
-        digitalWrite(RELAY_PUMP_B, HIGH);
-        sendPumpState("pumpB", true);
-        Serial.println("🍅 Pump B started (after 2s delay)");
-    }
-    
-    // ---- Debounced button read ----
-    bool btnReading = digitalRead(BTN_AUTO_PIN);
-    if (btnReading != btnLastState) {
-        btnLastDebounceTime = millis();
-    }
-    btnLastState = btnReading;
-
-    if ((millis() - btnLastDebounceTime) > BTN_DEBOUNCE_MS) {
-        if (btnReading != btnStableState) {
-            btnStableState = btnReading;
-            // Trigger on press (HIGH→LOW because INPUT_PULLUP)
-            if (btnStableState == LOW) {
-                autoMode = !autoMode;
-                Serial.printf("\xF0\x9F\x8D\x85 Button: autoMode=%s\n", autoMode ? "ON" : "OFF");
-                if (!autoMode) {
-                    stopAllPumps();
-                }
-                ecStableSince = 0;
-                // Notify web UI immediately
-                sendSensorData();
-            }
-        }
-    }
-
-    if (millis() - lastDataSend >= DATA_INTERVAL) {
-        lastDataSend = millis();
-        updateSensors();
-        processAutoMode();
-        sendSensorData();
-        updateLCD();
-    }
-}
-
-void stopAllPumps() {
-    pumpA_on = false;
-    pumpB_on = false;
-    mainPump_on = false;
-    waitingForPumpB = false;
-
-    digitalWrite(RELAY_PUMP_A, LOW);
-    digitalWrite(RELAY_PUMP_B, LOW);
-    digitalWrite(RELAY_MAIN_PUMP, LOW);
-
-    sendPumpState("pumpA", false);
-    sendPumpState("pumpB", false);
-    sendPumpState("mainPump", false);
+  mqtt.publish(T_SYS_AUTO, autoMode ? "1" : "0");
 }
 
 void processAutoMode() {
-    if (!autoMode) return;
+  if (!autoMode || emergencyStopActive) {
+    return;
+  }
 
-    // ---- EC dosing (Pump A/B) ----
-    if (ecValue < targetEc - EC_TOLERANCE) {
-        // เปิด pump A ถ้ายังปิด
-        if (!pumpA_on) {
-            pumpA_on = true;
-            digitalWrite(RELAY_PUMP_A, HIGH);
-            sendPumpState("pumpA", true);
+  unsigned long elapsed = millis() - dosingStateStartTime;
 
-            // เริ่มนับ 2 วิ สำหรับ Pump B
-            waitingForPumpB = true;
-            pumpBStartTime = millis();
+  switch (autoState) {
+    case DOSING_IDLE:
+      if (ecValue < targetEc - EC_TOLERANCE) {
+        autoState = DOSING_A;
+        dosingStateStartTime = millis();
+        pumpA_on = true;
+        writeRelay(RELAY_PUMP_A, true);
+        sendPumpState("pumpA", true);
+      } else if (phValue > targetPh + PH_TOLERANCE) {
+        autoState = DOSING_PH;
+        dosingStateStartTime = millis();
+        pumpPh_on = true;
+        writeRelay(RELAY_PUMP_PH, true);
+        sendPumpState("pumpPh", true);
+      } else {
+        // Safe defaults when resting
+        if (pumpA_on || pumpB_on || pumpPh_on) {
+          stopAllPumps(true);
+          autoMode = true; // prevent stopAllPumps from breaking overall UI toggle expectation
         }
-    } else {
-        // EC ถึงหรือเกินเป้า -> ปิด pumps A/B
-        if (pumpA_on || pumpB_on) {
-            pumpA_on = false;
-            pumpB_on = false;
-            waitingForPumpB = false;
-            digitalWrite(RELAY_PUMP_A, LOW);
-            digitalWrite(RELAY_PUMP_B, LOW);
-            sendPumpState("pumpA", false);
-            sendPumpState("pumpB", false);
-        }
-    }
+      }
+      break;
 
-    // ---- EC stable ตรวจสอบ 10 วินาที ----
-    if (fabs(ecValue - targetEc) <= EC_TOLERANCE) {
-        if (ecStableSince == 0) ecStableSince = millis();
-    } else {
-        ecStableSince = 0;
-    }
+    case DOSING_A:
+      if (elapsed >= PUMP_DOSE_MS) {
+        pumpA_on = false;
+        writeRelay(RELAY_PUMP_A, false);
+        sendPumpState("pumpA", false);
+        autoState = DOSING_WAIT_B;
+        dosingStateStartTime = millis();
+      }
+      break;
 
-    // ---- เมื่อ EC เสถียร 10 วิ ให้ควบคุม pH (main pump) ----
-    if (ecStableSince != 0 && millis() - ecStableSince >= EC_STABLE_TIME) {
-        if (phValue > targetPh + 0.05f) {
-            if (!mainPump_on) {
-                mainPump_on = true;
-                digitalWrite(RELAY_MAIN_PUMP, HIGH);
-                sendPumpState("mainPump", true);
-            }
-        } else {
-            if (mainPump_on) {
-                mainPump_on = false;
-                digitalWrite(RELAY_MAIN_PUMP, LOW);
-                sendPumpState("mainPump", false);
-            }
-        }
-    }
+    case DOSING_WAIT_B:
+      if (elapsed >= PUMP_B_DELAY) {
+        pumpB_on = true;
+        writeRelay(RELAY_PUMP_B, true);
+        sendPumpState("pumpB", true);
+        autoState = DOSING_B;
+        dosingStateStartTime = millis();
+      }
+      break;
+
+    case DOSING_B:
+      if (elapsed >= PUMP_DOSE_MS) {
+        pumpB_on = false;
+        writeRelay(RELAY_PUMP_B, false);
+        sendPumpState("pumpB", false);
+        autoState = DOSING_MIX_EC;
+        dosingStateStartTime = millis();
+      }
+      break;
+
+    case DOSING_MIX_EC:
+      if (elapsed >= PUMP_MIXING_MS) {
+        autoState = DOSING_IDLE;
+      }
+      break;
+
+    case DOSING_PH:
+      if (elapsed >= PH_DOSE_MS) {
+        pumpPh_on = false;
+        writeRelay(RELAY_PUMP_PH, false);
+        sendPumpState("pumpPh", false);
+        autoState = DOSING_MIX_PH;
+        dosingStateStartTime = millis();
+      }
+      break;
+
+    case DOSING_MIX_PH:
+      if (elapsed >= PH_MIXING_MS) {
+        autoState = DOSING_IDLE;
+      }
+      break;
+  }
 }
 
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\nTomato Hydroponics Controller - Refactored");
+
+  EEPROM.begin(32);
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+  loadPhCalibration();
+  loadEcCalibration();
+
+  pinMode(RELAY_PUMP_A, OUTPUT);
+  pinMode(RELAY_PUMP_B, OUTPUT);
+  pinMode(RELAY_PUMP_PH, OUTPUT);
+  pinMode(RELAY_SOLENOID_1, OUTPUT);
+  pinMode(RELAY_MAIN_PUMP, OUTPUT);
+  forceRelaysOff();
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  initButton(btnMain);
+  initButton(btnStage);
+  initButton(btnEstop);
+
+  applyGrowthStage(0, false);
+
+  u8g2.begin();
+  u8g2.setPowerSave(0);
+  u8g2.setDrawColor(1);
+  u8g2.setFontDirection(0);
+  updateLCD();
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  espClient.setInsecure();
+  espClient.setHandshakeTimeout(5);
+  mqtt.setServer(MQTT_SERVER, MQTT_PORT);
+  mqtt.setBufferSize(512);
+  mqtt.setCallback(mqttCallback);
+}
+
+void loop() {
+  unsigned long now = millis();
+
+  // High-priority hardware inputs
+  handleHardwareButtons(now);
+
+  // Non-blocking WiFi maintenance
+  if (WiFi.status() != WL_CONNECTED) {
+    if (now - lastWifiLog >= WIFI_LOG_INTERVAL) {
+      lastWifiLog = now;
+      Serial.println("[WiFi] Disconnected");
+    }
+    if (now - lastWifiReconnectAttempt >= WIFI_RECONNECT_INTERVAL) {
+      lastWifiReconnectAttempt = now;
+      WiFi.reconnect();
+    }
+  }
+
+  // Non-blocking MQTT maintenance
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!mqtt.connected()) {
+      if (now - lastMqttReconnectAttempt >= MQTT_RECONNECT_INTERVAL) {
+        lastMqttReconnectAttempt = now;
+        reconnectMQTT();
+      }
+    } else {
+      mqtt.loop();
+    }
+  }
+
+  // Periodic data task
+  if (now - lastDataSend >= DATA_INTERVAL) {
+    lastDataSend = now;
+    updateSensors();
+    sendSensorData();
+  }
+
+  processAutoMode(); // Call rapidly to evaluate state machine delays against millis()
+
+  // Faster UI refresh
+  if (now - lastLcdUpdate >= LCD_UPDATE_INTERVAL) {
+    lastLcdUpdate = now;
+    updateLCD();
+  }
+}

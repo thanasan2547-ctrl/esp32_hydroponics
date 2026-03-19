@@ -3,10 +3,7 @@
   "version": "1.0.0",
   "description": "Smart Hydroponics Dashboard - Cloud Version",
   "main": "public/index.html",
-  "scripts": {
-    "build": "echo 'Build complete'",
-    "start": "npx serve public"
-  },
+  "scripts": {},
   "keywords": [
     "hydroponics",
     "dashboard",

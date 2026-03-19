@@ -64,7 +64,6 @@ esp32_hydroponics/
 │   │   └── index.html         # Dashboard (deploys to Vercel)
 │   ├── vercel.json            # Vercel deployment config
 │   └── package.json
-├── cloud_version_web.html     # Original standalone dashboard
 └── README.md
 ```
 
