@@ -14,6 +14,7 @@
 #include <U8g2lib.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
 
 // ---- Sensor Pins ----
 #define PH_PIN            35
@@ -34,7 +35,7 @@
 #define RELAY_PUMP_PH     14
 #define RELAY_SOLENOID_1  26
 #define RELAY_MAIN_PUMP   27
-const bool RELAY_ACTIVE_HIGH = false; // Changed to false for standard Active-Low 4CH Relays
+const bool RELAY_ACTIVE_HIGH = true; // Reverted back to true for Active-High Relays
 
 // ---- Buttons ----
 #define BTN_MAIN_PIN      16   // NO: main pump + solenoid toggle
@@ -133,6 +134,10 @@ const unsigned long PUMP_B_DELAY = 2000;        // Wait 2s before A -> B
 const unsigned long PUMP_MIXING_MS = 30000;     // Mix for 30s before reading again
 const unsigned long PH_DOSE_MS = 1500;          // Dose pH for 1.5s
 const unsigned long PH_MIXING_MS = 20000;       // Mix pH for 20s
+
+// ---- Daily Schedule ----
+bool dailyScheduleActive = false;
+bool dailyMixingDone = false;
 
 // ---- Emergency ----
 bool emergencyStopActive = false;
@@ -688,6 +693,41 @@ void processAutoMode() {
   }
 }
 
+void processDailySchedule() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 10)) return;
+
+  int hour = timeinfo.tm_hour;
+
+  if (hour >= 8 && hour < 10) {
+    if (!dailyScheduleActive) {
+      dailyScheduleActive = true;
+      dailyMixingDone = false;
+      autoMode = true; 
+      sendSensorData();
+      Serial.println("[Schedule] 08:00 -> Phase 1: Mixing");
+    }
+    if (!dailyMixingDone) {
+      if (autoMode && autoState == DOSING_IDLE && 
+          fabs(ecValue - targetEc) <= EC_TOLERANCE && 
+          fabs(phValue - targetPh) <= PH_TOLERANCE) {
+        dailyMixingDone = true;
+        setMainFlow(true, true);
+        Serial.println("[Schedule] Mixed -> Phase 2: Flow to Plants");
+      }
+    }
+  } else {
+    if (dailyScheduleActive) {
+      dailyScheduleActive = false;
+      dailyMixingDone = false;
+      autoMode = false;
+      stopAllPumps(true);
+      sendSensorData();
+      Serial.println("[Schedule] 10:00 -> Phase 3: Idle");
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println("\nTomato Hydroponics Controller - Refactored");
@@ -728,6 +768,8 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
 
   espClient.setInsecure();
   espClient.setHandshakeTimeout(5);
@@ -774,6 +816,7 @@ void loop() {
   }
 
   processAutoMode(); // Call rapidly to evaluate state machine delays against millis()
+  processDailySchedule(); // Check daily timing
 
   // Faster UI refresh
   if (now - lastLcdUpdate >= LCD_UPDATE_INTERVAL) {
