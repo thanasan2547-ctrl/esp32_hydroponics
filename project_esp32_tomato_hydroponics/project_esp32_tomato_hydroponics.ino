@@ -23,7 +23,7 @@
 
 // ---- Ultrasonic HC-SR04 ----
 #define TRIG_PIN          25
-#define ECHO_PIN          32
+#define ECHO_PIN          33
 #define WATER_FULL_DIST   20.0f
 #define WATER_EMPTY_DIST  42.0f
 
