@@ -2652,9 +2652,24 @@
                                     syncAutoButtons(!!state.auto);
 
                                     // Emergency override display
+                                    const btnStop = document.getElementById('btnStop');
                                     if (state.emergency) {
                                         document.getElementById('statusTxt').textContent = 'EMERGENCY STOP';
                                         document.getElementById('dot').className = 'status-dot off';
+                                        if (btnStop) {
+                                            btnStop.classList.add('emergency-active');
+                                            btnStop.innerHTML = '🛡️ Clear Emergency';
+                                        }
+                                        if (dosingEl.statusText) dosingEl.statusText.textContent = '⛔ EMERGENCY STOP ACTIVE';
+                                    } else {
+                                        if (btnStop) {
+                                            btnStop.classList.remove('emergency-active');
+                                            btnStop.innerHTML = '🛑 Emergency Stop';
+                                        }
+                                        if (espOnline) {
+                                            document.getElementById('statusTxt').textContent = 'SYSTEM ONLINE';
+                                            document.getElementById('dot').className = 'status-dot';
+                                        }
                                     }
                                 }
                             } catch (e) {
@@ -2851,11 +2866,18 @@
         }
 
         function sendStop() {
-            if (isConnected) {
-                mqttPub(T.SYS_EMERGENCY, '1');
-                if (dosingEl.statusText) dosingEl.statusText.textContent = "สั่งหยุดปั๊มทั้งหมด";
-            } else {
+            if (!isConnected) {
                 allPumpsOff();
+                return;
+            }
+            // Toggle logic: if already in emergency, send '0' to clear. Otherwise '1' to stop.
+            const btnStop = document.getElementById('btnStop');
+            const isCurrentlyEmergency = btnStop && btnStop.classList.contains('emergency-active');
+            
+            mqttPub(T.SYS_EMERGENCY, isCurrentlyEmergency ? '0' : '1');
+            
+            if (dosingEl.statusText) {
+                dosingEl.statusText.textContent = isCurrentlyEmergency ? "กำลังยกเลิกสถานะฉุกเฉิน..." : "สั่งหยุดฉุกเฉิน (Emergency Stop)";
             }
         }
 

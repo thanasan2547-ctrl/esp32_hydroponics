@@ -146,6 +146,7 @@ bool autoMode = false;
 // When a user toggles a pump manually (button or MQTT), we suspend automatic dosing until
 // auto mode is explicitly re-enabled. This prevents auto logic from fighting manual input.
 bool manualOverride = false;
+bool webEmergencyStop = false; // Persistent emergency stop from web
 
 const float EC_TOLERANCE = 0.05f;
 const float PH_TOLERANCE = 0.05f;
@@ -232,14 +233,16 @@ void publishSystemState() {
   char buf[128];
   int len = snprintf(
     buf, sizeof(buf),
-    "{\"pumpA\":%d,\"pumpB\":%d,\"pumpPh\":%d,\"mainPump\":%d,\"solenoid1\":%d,\"auto\":%d,\"emergency\":%d}",
+    "{\"pumpA\":%d,\"pumpB\":%d,\"pumpPh\":%d,\"mainPump\":%d,\"solenoid1\":%d,\"auto\":%d,\"emergency\":%d,\"hw_emergency\":%d,\"web_emergency\":%d}",
     pumpA_on ? 1 : 0,
     pumpB_on ? 1 : 0,
     pumpPh_on ? 1 : 0,
     mainPump_on ? 1 : 0,
     solenoid1_on ? 1 : 0,
     autoMode ? 1 : 0,
-    emergencyStopActive ? 1 : 0
+    (emergencyStopActive || webEmergencyStop) ? 1 : 0,
+    emergencyStopActive ? 1 : 0,
+    webEmergencyStop ? 1 : 0
   );
 
   if (len > 0) {
@@ -248,7 +251,7 @@ void publishSystemState() {
 }
 
 void applyRelayStates(bool publishState = true) {
-  if (emergencyStopActive) {
+  if (emergencyStopActive || webEmergencyStop) {
     // Emergency stop overrides all other control paths
     if (relayPumpA_out || relayPumpB_out || relayPumpPh_out || relayMainPump_out || relaySolenoid1_out) {
       writeRelay(RELAY_PUMP_A, false);
@@ -545,7 +548,7 @@ void handleHardwareButtons(unsigned long nowMs) {
   updateButton(btnStage, nowMs);
   updateButton(btnEstop, nowMs);
 
-  bool estopNow = (btnEstop.stableState == HIGH);
+  bool estopNow = (btnEstop.stableState == HIGH); // NC: High when pressed/open
   if (estopNow) {
     if (!emergencyStopActive) {
       emergencyStopActive = true;
@@ -557,19 +560,18 @@ void handleHardwareButtons(unsigned long nowMs) {
         mqtt.publish(T_SYS_STATUS, "hardware_estop", false);
       }
       publishSystemState();
-      Serial.println("[E-STOP] ACTIVE - all relays OFF");
+      Serial.println("[E-STOP] Hardware ACTIVE - all relays OFF");
     } else {
-      // Keep relays forced off while the emergency button is held
       forceRelaysOff();
     }
-    return;
-  }
-
-  if (emergencyStopActive) {
-    emergencyStopActive = false;
-    manualOverride = false;
-    publishSystemState();
-    Serial.println("[E-STOP] Released");
+    // REMOVED: return; so that loop() continues to call mqtt.loop()
+  } else {
+    if (emergencyStopActive) {
+      emergencyStopActive = false;
+      manualOverride = false;
+      publishSystemState();
+      Serial.println("[E-STOP] Hardware Released");
+    }
   }
 
   if (btnMain.pressedEvent) {
@@ -599,16 +601,19 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.printf("[MQTT] %s => %s\n", topic, msg);
 
   if (strcmp(topic, T_SYS_EMERGENCY) == 0) {
-    // Just stop everything normally (don't flag hardware emergencyStopActive or it will fight the physical button)
+    bool active = (msg[0] == '1');
+    webEmergencyStop = active;
     manualOverride = false;
     autoMode = false;
-    dailyScheduleActive = false; // Override the daily loop
+    dailyScheduleActive = false; 
     stopAllPumps(true);
     mqtt.publish(T_SYS_AUTO, "0");
+    publishSystemState();
+    Serial.printf("[E-STOP] Web %s\n", active ? "ACTIVE" : "CLEARED");
     return;
   }
 
-  if (emergencyStopActive) {
+  if (emergencyStopActive || webEmergencyStop) {
     return;
   }
 
@@ -757,7 +762,7 @@ void sendSensorData() {
 }
 
 void processAutoMode() {
-  if (!autoMode || emergencyStopActive || manualOverride) {
+  if (!autoMode || emergencyStopActive || webEmergencyStop || manualOverride) {
     return;
   }
 
