@@ -34,7 +34,7 @@
 #define RELAY_PUMP_PH     14
 #define RELAY_SOLENOID_1  26
 #define RELAY_MAIN_PUMP   27
-const bool RELAY_ACTIVE_HIGH = true;
+const bool RELAY_ACTIVE_HIGH = false; // Changed to false for standard Active-Low 4CH Relays
 
 // ---- Buttons ----
 #define BTN_MAIN_PIN      16   // NO: main pump + solenoid toggle
@@ -481,16 +481,19 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     pumpA_on = on;
     writeRelay(RELAY_PUMP_A, pumpA_on);
     sendPumpState("pumpA", pumpA_on);
+    if (autoMode) { autoMode = false; sendSensorData(); } // Break out of auto if manual override
   } else if (strcmp(topic, T_PUMP_B) == 0) {
     bool on = (msg[0] == '1');
     pumpB_on = on;
     writeRelay(RELAY_PUMP_B, pumpB_on);
     sendPumpState("pumpB", pumpB_on);
+    if (autoMode) { autoMode = false; sendSensorData(); }
   } else if (strcmp(topic, T_PUMP_PH) == 0) {
     bool on = (msg[0] == '1');
     pumpPh_on = on;
     writeRelay(RELAY_PUMP_PH, pumpPh_on);
     sendPumpState("pumpPh", pumpPh_on);
+    if (autoMode) { autoMode = false; sendSensorData(); }
   } else if (strcmp(topic, T_PUMP_MAIN) == 0) {
     bool on = (msg[0] == '1');
     setMainFlow(on, true);
@@ -501,10 +504,13 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     targetPh = atof(msg);
     activeStageIndex = -1;
   } else if (strcmp(topic, T_SYS_AUTO) == 0) {
-    autoMode = (msg[0] == '1');
-    autoState = DOSING_IDLE;
-    if (!autoMode) {
-      stopAllPumps(true);
+    bool newAuto = (msg[0] == '1');
+    if (autoMode != newAuto) {
+      autoMode = newAuto;
+      autoState = DOSING_IDLE;
+      if (!autoMode) {
+        stopAllPumps(true);
+      }
     }
   } else if (strcmp(topic, T_CTRL_CALIBRATE) == 0) {
     handleCalibration(msg);
@@ -692,10 +698,16 @@ void setup() {
   loadPhCalibration();
   loadEcCalibration();
 
+  // Set HIGH before pinMode to prevent Active-Low relays from turning on instantly
+  digitalWrite(RELAY_PUMP_A, RELAY_ACTIVE_HIGH ? LOW : HIGH);
   pinMode(RELAY_PUMP_A, OUTPUT);
+  digitalWrite(RELAY_PUMP_B, RELAY_ACTIVE_HIGH ? LOW : HIGH);
   pinMode(RELAY_PUMP_B, OUTPUT);
+  digitalWrite(RELAY_PUMP_PH, RELAY_ACTIVE_HIGH ? LOW : HIGH);
   pinMode(RELAY_PUMP_PH, OUTPUT);
+  digitalWrite(RELAY_SOLENOID_1, RELAY_ACTIVE_HIGH ? LOW : HIGH);
   pinMode(RELAY_SOLENOID_1, OUTPUT);
+  digitalWrite(RELAY_MAIN_PUMP, RELAY_ACTIVE_HIGH ? LOW : HIGH);
   pinMode(RELAY_MAIN_PUMP, OUTPUT);
   forceRelaysOff();
 
