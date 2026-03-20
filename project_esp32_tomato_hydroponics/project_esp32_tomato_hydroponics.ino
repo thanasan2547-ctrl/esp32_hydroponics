@@ -86,6 +86,7 @@ const char* T_PUMP_A        = "hydroponics/pump/a";
 const char* T_PUMP_B        = "hydroponics/pump/b";
 const char* T_PUMP_PH       = "hydroponics/pump/ph";
 const char* T_PUMP_MAIN     = "hydroponics/pump/main";
+const char* T_PUMP_SOLENOID = "hydroponics/pump/solenoid1";
 const char* T_SYS_STATUS    = "hydroponics/system/status";
 const char* T_SYS_AUTO      = "hydroponics/system/auto";
 const char* T_SYS_STATE     = "hydroponics/system/state";
@@ -322,7 +323,6 @@ void forceRelaysOff() {
 
 void setMainFlow(bool on, bool publishState = true) {
   mainPump_on = on;
-  solenoid1_on = on;
   applyRelayStates(publishState);
 }
 
@@ -649,7 +649,18 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (mainPump_on != on) {
       manualOverride = true;
       autoMode = false;
-      setMainFlow(on, true);
+      mainPump_on = on; // Directly control mainPump_on
+      applyRelayStates(true); // Apply changes
+      sendSensorData();
+    }
+  } else if (strcmp(topic, T_PUMP_SOLENOID) == 0) {
+    bool on = (msg[0] == '1');
+    if (solenoid1_on != on) {
+      manualOverride = true;
+      autoMode = false;
+      solenoid1_on = on;
+      applyRelayStates(true);
+      sendSensorData();
     }
   } else if (strcmp(topic, T_CTRL_EC) == 0) {
     targetEc = atof(msg);
@@ -717,6 +728,16 @@ void handleCalibration(const char* cmd) {
   }
 }
 
+// Assuming T_PUMP_SOLENOID is defined globally like other T_PUMP_ topics
+// For example: const char* T_PUMP_SOLENOID = "hydro/pump/solenoid1";
+// And setMainFlow is modified to only affect mainPump_on.
+// Example setMainFlow:
+// void setMainFlow(bool on, bool publishState) {
+//   mainPump_on = on;
+//   applyRelayStates(publishState);
+//   sendSensorData();
+// }
+
 void reconnectMQTT() {
   String clientId = "ESP32Client-Tomato-";
   clientId += String(random(0xffff), HEX);
@@ -727,6 +748,7 @@ void reconnectMQTT() {
     mqtt.subscribe(T_PUMP_B);
     mqtt.subscribe(T_PUMP_PH);
     mqtt.subscribe(T_PUMP_MAIN);
+    mqtt.subscribe(T_PUMP_SOLENOID);
     mqtt.subscribe(T_CTRL_EC);
     mqtt.subscribe(T_CTRL_PH);
     mqtt.subscribe(T_SYS_AUTO);
