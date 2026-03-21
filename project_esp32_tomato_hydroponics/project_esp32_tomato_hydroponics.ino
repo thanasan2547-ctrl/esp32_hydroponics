@@ -67,10 +67,10 @@ U8G2_ST7920_128X64_F_SW_SPI u8g2(U8G2_R0, LCD_CLK, LCD_DATA, LCD_CS, LCD_RST);
 #define EC_DEFAULT_TEMP   25.0f
 
 // ---- WiFi ----
-const char* WIFI_SSID = "Pew";
-const char* WIFI_PASS = "88888888";
-//const char* WIFI_SSID = "Yumgaizap";
-//const char* WIFI_PASS = "0625321533";
+//const char* WIFI_SSID = "Pew";
+//const char* WIFI_PASS = "88888888";
+const char* WIFI_SSID = "Yumgaizap";
+const char* WIFI_PASS = "0625321533";
 
 // ---- MQTT ----
 const char* MQTT_SERVER = "8218cf51f5de4ac5a776aa0efb931888.s1.eu.hivemq.cloud";

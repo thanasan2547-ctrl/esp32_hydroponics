@@ -1718,6 +1718,8 @@
                     <div class="status-line">
                         <span class="status-dot" id="dot"></span>
                         <span class="status-text" id="statusTxt">SIMULATION</span>
+                        <span style="margin: 0 4px; color: var(--text3);">|</span>
+                        <span class="status-text" id="realtimeClock" style="color: var(--text)">--:--:--</span>
                     </div>
                 </div>
             </div>
@@ -1784,6 +1786,17 @@
                     </div>
                     <label class="toggle"><input type="checkbox" id="pM"
                             onchange="pumpToggle('mainPump', this.checked)"><span class="toggle-slider"></span></label>
+                </div>
+                <div class="pump-row">
+                    <div class="pump-info">
+                        <div class="pump-icon-wrap" style="background:var(--orange-light); color:var(--orange);">🚰</div>
+                        <div>
+                            <div class="pump-name">Solenoid 1</div>
+                            <div class="pump-sub">เปิด/ปิดวาล์วน้ำ</div>
+                        </div>
+                    </div>
+                    <label class="toggle"><input type="checkbox" id="pS1"
+                            onchange="pumpToggle('solenoid1', this.checked)"><span class="toggle-slider"></span></label>
                 </div>
             </div>
         </div>
@@ -2559,6 +2572,7 @@
             PUMP_B: 'hydroponics/pump/b',
             PUMP_PH: 'hydroponics/pump/ph',
             PUMP_MAIN: 'hydroponics/pump/main',
+            PUMP_SOLENOID: 'hydroponics/pump/solenoid1',
             CTRL_EC: 'hydroponics/control/ec_target',
             CTRL_PH: 'hydroponics/control/ph_target',
             SYS_AUTO: 'hydroponics/system/auto',
@@ -2601,7 +2615,7 @@
                     // Subscribe to all relevant topics
                     client.subscribe([
                         T.SENSOR_EC, T.SENSOR_PH, T.SENSOR_WATER,
-                        T.PUMP_A, T.PUMP_B, T.PUMP_PH, T.PUMP_MAIN,
+                        T.PUMP_A, T.PUMP_B, T.PUMP_PH, T.PUMP_MAIN, T.PUMP_SOLENOID,
                         T.SYS_AUTO, T.SYS_STATUS, T.SYS_STATE,
                         T.CTRL_EC, T.CTRL_PH,
                     ]);
@@ -2644,6 +2658,9 @@
                         case T.PUMP_MAIN:
                             setPumpUI('pM', val === '1');
                             break;
+                        case T.PUMP_SOLENOID:
+                            setPumpUI('pS1', val === '1');
+                            break;
                         case T.SYS_AUTO:
                             syncAutoButtons(val === '1');
                             break;
@@ -2655,6 +2672,7 @@
                                     setPumpUI('pB', !!state.pumpB);
                                     setPumpUI('pPH', !!state.pumpPh);
                                     setPumpUI('pM', !!state.mainPump);
+                                    setPumpUI('pS1', !!state.solenoid1);
                                     syncAutoButtons(!!state.auto);
 
                                     // Emergency override display
@@ -2802,7 +2820,7 @@
 
         // Manual controls via toggle — publish to per-pump topics
         function pumpToggle(pump, on) {
-            const topicMap = { pumpA: T.PUMP_A, pumpB: T.PUMP_B, phDown: T.PUMP_PH, mainPump: T.PUMP_MAIN };
+            const topicMap = { pumpA: T.PUMP_A, pumpB: T.PUMP_B, phDown: T.PUMP_PH, mainPump: T.PUMP_MAIN, solenoid1: T.PUMP_SOLENOID };
             const topic = topicMap[pump];
             if (topic && isConnected) {
                 mqttPub(topic, on ? '1' : '0');
@@ -2812,6 +2830,7 @@
             if (pump === 'pumpB') setPumpUI('pB', on);
             if (pump === 'phDown') setPumpUI('pPH', on);
             if (pump === 'mainPump') setPumpUI('pM', on);
+            if (pump === 'solenoid1') setPumpUI('pS1', on);
         }
 
         function setEC() {
@@ -2892,6 +2911,7 @@
             pumpToggle('pumpB', false);
             pumpToggle('phDown', false);
             pumpToggle('mainPump', false);
+            pumpToggle('solenoid1', false);
         }
 
         el.ecIn.addEventListener('keypress', e => { if (e.key === 'Enter') setEC(); });
@@ -2901,6 +2921,15 @@
         const dosingEl = {
             statusText: document.getElementById('dosingStatusText')
         };
+
+        // Start Realtime Clock
+        setInterval(() => {
+            const now = new Date();
+            const clockEl = document.getElementById('realtimeClock');
+            if (clockEl) {
+                clockEl.textContent = now.toLocaleTimeString('th-TH');
+            }
+        }, 1000);
 
         // On load
         refreshTargetUI();
