@@ -133,6 +133,50 @@
         }
 
         /* ============================================
+           CLOCK WIDGET
+           ============================================ */
+        .clock-widget {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            transition: all 0.3s ease;
+            margin-left: auto;
+        }
+
+        .clock-inner {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 2px;
+        }
+
+        .clock-emoji {
+            font-size: 16px;
+            animation: tick 1s infinite alternate;
+        }
+
+        @keyframes tick {
+            0% { transform: scale(1) rotate(-5deg); }
+            100% { transform: scale(1.1) rotate(5deg); }
+        }
+
+        .clock-time {
+            font-size: 16px;
+            font-weight: 800;
+            color: var(--primary);
+            font-variant-numeric: tabular-nums;
+            letter-spacing: 1px;
+        }
+
+        .clock-date {
+            font-size: 10px;
+            font-weight: 700;
+            color: var(--text3);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        /* ============================================
            HEADER
            ============================================ */
         .header {
@@ -145,6 +189,8 @@
             margin-bottom: 16px;
             border: 1px solid var(--border);
             box-shadow: var(--shadow);
+            flex-wrap: wrap;
+            gap: 12px;
         }
 
         .logo {
@@ -949,6 +995,8 @@
         .conn-bar {
             display: flex;
             align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
             gap: 10px;
             padding: 12px 18px;
             background: var(--card);
@@ -957,6 +1005,13 @@
             box-shadow: var(--shadow);
             margin-bottom: 16px;
             grid-column: 1 / -1;
+        }
+
+        .conn-bar-left {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
         }
 
         .conn-bar-label {
@@ -1336,6 +1391,19 @@
            RESPONSIVE
            ============================================ */
         @media (max-width: 500px) {
+            .conn-bar {
+                flex-direction: column;
+                align-items: center;
+                gap: 16px;
+            }
+            .clock-widget {
+                align-items: center;
+                margin-left: 0;
+            }
+            .conn-bar-left {
+                justify-content: center;
+            }
+            
             .sensor-grid {
                 grid-template-columns: 1fr 1fr;
                 gap: 10px;
@@ -1718,11 +1786,10 @@
                     <div class="status-line">
                         <span class="status-dot" id="dot"></span>
                         <span class="status-text" id="statusTxt">SIMULATION</span>
-                        <span style="margin: 0 4px; color: var(--text3);">|</span>
-                        <span class="status-text" id="realtimeClock" style="color: var(--text)">--:--:--</span>
                     </div>
                 </div>
             </div>
+
             <div class="header-actions">
                 <button class="icon-btn" onclick="toggleSidebar()" title="เลือกชนิดพืช">🌿</button>
                 <button class="icon-btn" onclick="toggleTheme()" title="เปลี่ยนธีม">🎨</button>
@@ -1731,10 +1798,21 @@
 
         <!-- CONNECTION BAR -->
         <div class="conn-bar">
-            <span class="conn-bar-label">☁️ ESP32 System Status</span>
-            <div class="conn-bar-status">
-                <div class="conn-bar-dot" id="connDot"></div>
-                <span class="conn-bar-status-text" id="connStatusText">รอรับข้อมูล (Waiting...)</span>
+            <div class="conn-bar-left">
+                <span class="conn-bar-label">☁️ ESP32 System Status</span>
+                <div class="conn-bar-status">
+                    <div class="conn-bar-dot" id="connDot"></div>
+                    <span class="conn-bar-status-text" id="connStatusText">รอรับข้อมูล (Waiting...)</span>
+                </div>
+            </div>
+
+            <!-- CLOCK WIDGET -->
+            <div class="clock-widget">
+                <div class="clock-inner">
+                    <span class="clock-emoji">🕒</span>
+                    <span class="clock-time" id="realtimeClock">--:--:--</span>
+                </div>
+                <div class="clock-date" id="realtimeDate">--/--/----</div>
             </div>
         </div>
 
@@ -2926,8 +3004,13 @@
         setInterval(() => {
             const now = new Date();
             const clockEl = document.getElementById('realtimeClock');
+            const dateEl = document.getElementById('realtimeDate');
             if (clockEl) {
-                clockEl.textContent = now.toLocaleTimeString('th-TH');
+                clockEl.textContent = now.toLocaleTimeString('th-TH', { hour12: false });
+            }
+            if (dateEl) {
+                const options = { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' };
+                dateEl.textContent = now.toLocaleDateString('th-TH', options);
             }
         }, 1000);
 
