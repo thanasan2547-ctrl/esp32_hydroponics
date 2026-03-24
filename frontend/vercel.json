@@ -3,7 +3,7 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "https://hydroponics-backend.onrender.com/api/$1"
+      "destination": "https://esp32-hydroponics.onrender.com/api/$1"
     }
   ]
 }
