@@ -12,6 +12,7 @@ const mqttClient = require('./mqtt/client');
 const influx = require('./db/influx');
 const sensorRoutes = require('./routes/sensors');
 const controlRoutes = require('./routes/control');
+const chatRoutes = require('./routes/chat');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -26,6 +27,7 @@ app.use(express.json());
 // ---- Routes ----
 app.use('/api/sensors', sensorRoutes);
 app.use('/api/control', controlRoutes);
+app.use('/api/chat', chatRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
