@@ -2611,9 +2611,8 @@
            SENSOR UPDATE
            ============================================ */
         function updateSensors(ec, ph, water) {
-            // Check for disconnected state: pH 14 is the literal max when ADC is 0
-            // and EC 0 usually means no salt or no connection.
-            const isDisconnected = (ec === '--' || ph === '--' || ph >= 13.9 || ec < 0.001);
+            // Check for disconnected state specifically when no data arrives
+            const isDisconnected = (ec === '--' || ph === '--');
 
             if (isDisconnected) {
                 el.ecVal.textContent = (ec >= 0.001) ? ec.toFixed(2) : '--';
@@ -2672,7 +2671,8 @@
         }
 
         function getECStatus(ec) {
-            if (ec < 0.001) return { text: 'Disconnected', cls: 'badge-warn' };
+            if (ec === '--') return { text: 'Disconnected', cls: 'badge-warn' };
+            if (ec < 0.1) return { text: 'น้ำเปล่า/ต่ำมาก', cls: 'badge-warn' };
             const diff = ec - targetEC;
             if (Math.abs(diff) <= 0.2) return { text: 'เหมาะสม', cls: 'badge-ok' };
             if (diff > 0.2) return { text: 'สารอาหารสูง', cls: 'badge-danger' };
