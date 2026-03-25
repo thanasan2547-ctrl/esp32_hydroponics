@@ -164,7 +164,6 @@ const unsigned long PUMP_B_DOSE_MS = 1000;      // 1s
 const unsigned long PUMP_MIX_EC_MS = 7000;      // 7s mix/wait before next check
 const unsigned long PH_DOSE_MS = 1500;          // Dose pH for 1.5s
 const unsigned long PH_MIXING_MS = 20000;       // Mix pH for 20s
-const unsigned long FEEDING_DURATION_MS = 20 * 60 * 1000UL; // 20 minutes
 const float WATER_TARGET_PCT = 80.0f;
 
 // ---- Emergency ----
@@ -907,23 +906,13 @@ void processAutoMode() {
       }
       break;
 
-    case FEEDING_PLANTS:
-      // If we are outside the 8-10 AM window AND auto was not manually triggered 
-      // (or simply if the user wants it to stop after some time), we could end here.
-      // For now, if auto is ON and target is met, we keep Main Pump ON.
-      
-      // If the hour passes 10 AM, we might want to stop autoMode automatically
-      if (currentHr >= 10 || currentHr < 8) {
-          // If the user wants it to stop after the window:
-          // autoMode = false;
-          // mainPump_on = false;
-          // applyRelayStates(true);
-          // Serial.println("[Auto] Window ended (10 AM). System Idle.");
-      }
-
-      // Check pH during feeding as well
-      if (phValue > targetPh + PH_TOLERANCE) {
-          // Optionally handle pH dosing here or go to a PH state
+      // Keep Main Pump ON during the window. 
+      // If it passes 10 AM or is before 8 AM, stop the auto cycle.
+      // Note: only stop if time is actually set (currentHr != -1)
+      if (currentHr != -1 && (currentHr >= 10 || currentHr < 8)) {
+          Serial.println("[Auto] Window ended or outside 8-10 AM. Stopping cycle.");
+          autoMode = false;
+          stopAllPumps(true);
       }
       break;
 
