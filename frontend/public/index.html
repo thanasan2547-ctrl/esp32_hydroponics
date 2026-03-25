@@ -2566,10 +2566,9 @@
         /* ============================================
            STATE
            ============================================ */
-        const MAX_HISTORY = 50;
+        const MAX_HISTORY = 100;
         const ecHistory = [];
         const phHistory = [];
-
         const waterHistory = [];
 
         let targetEC = 0.0;
@@ -3199,6 +3198,44 @@
         el.ecIn.addEventListener('keypress', e => { if (e.key === 'Enter') setEC(); });
         el.phIn.addEventListener('keypress', e => { if (e.key === 'Enter') setPH(); });
 
+        /* ============================================
+           HISTORY FETCHING
+           ============================================ */
+        async function fetchHistory() {
+            try {
+                console.log('[History] Fetching last hour of data...');
+                const types = ['ec', 'ph', 'water'];
+                
+                // Fetch ทั้ง 3 เซ็นเซอร์พร้อมกัน (1hr range, 1min aggregate)
+                const requests = types.map(t => 
+                    fetch(`/api/sensors/history?type=${t}&range=1h&window=1m`)
+                        .then(res => res.ok ? res.json() : { data: [] })
+                        .catch(() => ({ data: [] }))
+                );
+
+                const results = await Promise.all(requests);
+
+                // เคลียร์ข้อมูลเก่าและใส่ข้อมูลใหม่ที่ดึงมา
+                if (results[0].data && results[0].data.length > 0) {
+                    ecHistory.length = 0;
+                    results[0].data.forEach(d => ecHistory.push(d.value));
+                }
+                if (results[1].data && results[1].data.length > 0) {
+                    phHistory.length = 0;
+                    results[1].data.forEach(d => phHistory.push(d.value));
+                }
+                if (results[2].data && results[2].data.length > 0) {
+                    waterHistory.length = 0;
+                    results[2].data.forEach(d => waterHistory.push(d.value));
+                }
+
+                console.log(`[History] Loaded points - EC: ${ecHistory.length}, pH: ${phHistory.length}`);
+                drawChart();
+            } catch (err) {
+                console.error('[History] Failed to fetch:', err);
+            }
+        }
+
         // Dosing UI refs
         const dosingEl = {
             statusText: document.getElementById('dosingStatusText')
@@ -3311,6 +3348,7 @@
         refreshTargetUI();
         selectPlant('tomato');
         connectToCloud(); // connect automatically
+        fetchHistory();   // ดึงข้อมูลย้อนหลังมาพล็อตขิ้นกราฟทันที
     </script>
 </body>
 
