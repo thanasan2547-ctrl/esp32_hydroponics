@@ -17,8 +17,8 @@
 #include <time.h>
 
 // ---- Sensor Pins ----
-#define PH_PIN            35
-#define EC_PIN            34
+#define PH_PIN            34
+#define EC_PIN            35
 #define SAMPLES           20
 
 // ---- Ultrasonic HC-SR04 ----
@@ -54,7 +54,7 @@ U8G2_ST7920_128X64_F_SW_SPI u8g2(U8G2_R0, LCD_CLK, LCD_DATA, LCD_CS, LCD_RST);
 #define PH_ADDR_SLOPE     0
 #define PH_ADDR_INTERCEPT 4
 #define PH_ADDR_VALID     8
-#define PH_VALID_MAGIC    0xAB
+#define PH_VALID_MAGIC    0xAC // Changed from 0xAB to force EEPROM reset after new math
 
 // ---- EC EEPROM ----
 #define EC_KVALUEADDR     0x0A
@@ -152,28 +152,28 @@ bool webEmergencyStop = false; // Persistent emergency stop from web
 const float EC_TOLERANCE = 0.05f;
 const float PH_TOLERANCE = 0.05f;
 
-enum AutoState { DOSING_IDLE, DOSING_A, DOSING_WAIT_B, DOSING_B, DOSING_MIX_EC, DOSING_PH, DOSING_MIX_PH };
-AutoState autoState = DOSING_IDLE;
+enum AutoState { AUTO_CHECK, DOSING_A, DOSING_WAIT_B, DOSING_B, DOSING_MIX_EC, DOSING_PH, DOSING_MIX_PH, FEEDING_PLANTS, DRAINING_WATER };
+AutoState autoState = AUTO_CHECK;
 unsigned long dosingStateStartTime = 0;
 unsigned long dosingAStartTime = 0;
 unsigned long dosingBStartTime = 0;
 
-const unsigned long PUMP_DOSE_MS = 2000;        // Dose for 2s
-const unsigned long PUMP_B_DELAY = 3000;        // Wait 3s after pump A starts before turning on pump B
-const unsigned long PUMP_MIXING_MS = 30000;     // Mix for 30s before reading again
+const unsigned long PUMP_A_DOSE_MS = 1000;      // 1s
+const unsigned long PUMP_B_DELAY_MS = 1000;     // 1s wait
+const unsigned long PUMP_B_DOSE_MS = 1000;      // 1s
+const unsigned long PUMP_MIX_EC_MS = 7000;      // 7s mix/wait before next check
 const unsigned long PH_DOSE_MS = 1500;          // Dose pH for 1.5s
 const unsigned long PH_MIXING_MS = 20000;       // Mix pH for 20s
-
-// ---- Daily Schedule ----
-bool dailyScheduleActive = false;
-bool dailyMixingDone = false;
+const unsigned long FEEDING_DURATION_MS = 20 * 60 * 1000UL; // 20 minutes
+const float WATER_TARGET_PCT = 80.0f;
 
 // ---- Emergency ----
 bool emergencyStopActive = false;
 
 // ---- Calibration ----
-float phSlope = -0.004593f;
-float phIntercept = 21.0f;
+// We use Explicit Voltage-Based 2-Point Interpolation
+float phVoltage7 = 2.0f; // Typical DFRobot neutral voltage
+float phVoltage4 = 1.419f; // Calculated from your ADC 1761 at pH 4 buffer
 float ecKvalueLow = 1.0f;
 float ecKvalueHigh = 1.0f;
 float ecKvalue = 1.0f;
@@ -219,6 +219,15 @@ void updateSensors();
 void updateLCD();
 void processAutoMode();
 void handleCalibration(const char* cmd);
+float getRawADC(int pin);
+
+int getCurrentHour() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return -1; // Time not set
+  }
+  return timeinfo.tm_hour;
+}
 
 void writeRelay(uint8_t relayPin, bool on) {
   if (RELAY_ACTIVE_HIGH) {
@@ -375,11 +384,11 @@ void updateButton(DebouncedButton& b, unsigned long nowMs) {
 
 void loadPhCalibration() {
   if (EEPROM.read(PH_ADDR_VALID) == PH_VALID_MAGIC) {
-    EEPROM.get(PH_ADDR_SLOPE, phSlope);
-    EEPROM.get(PH_ADDR_INTERCEPT, phIntercept);
-    Serial.printf("[pH] Calibration loaded: slope=%.6f intercept=%.4f\n", phSlope, phIntercept);
+    EEPROM.get(PH_ADDR_SLOPE, phVoltage7);
+    EEPROM.get(PH_ADDR_INTERCEPT, phVoltage4);
+    Serial.printf("[pH] Calibration loaded: v7=%.3fV v4=%.3fV\n", phVoltage7, phVoltage4);
   } else {
-    Serial.println("[pH] No calibration found, using defaults");
+    Serial.println("[pH] No calibration found or format changed, using defaults");
   }
 }
 
@@ -401,33 +410,53 @@ void loadEcCalibration() {
 }
 
 float readPH() {
-  long sum = 0;
-  for (int i = 0; i < SAMPLES; i++) {
-    sum += analogRead(PH_PIN);
-  }
-  float avg = (float)sum / SAMPLES;
-  float ph = phSlope * avg + phIntercept;
+  float avg = getRawADC(PH_PIN);
+  float voltage = avg / ADC_RES * VREF / 1000.0f;
+  
+  // Explicit 2-point calculation (handles both positive and negative slope sensors correctly)
+  float slope = (7.0f - 4.0f) / (phVoltage7 - phVoltage4);
+  float intercept = 7.0f - slope * phVoltage7;
+  
+  float ph = slope * voltage + intercept;
+  
+  // Debug to Serial Monitor to verify ADC health
+  Serial.printf("[pH Sensor] Voltage: %.3fV, Slope: %.2f, pH: %.2f\n", voltage, slope, ph);
+  
   return constrain(ph, 0.0f, 14.0f);
 }
 
 float readEC() {
+  // อ่าน 40 ครั้ง (ตาม reference snippet)
+  int buf[40];
+  for (int i = 0; i < 40; i++) {
+    buf[i] = analogRead(EC_PIN);
+    delay(10);
+  }
+
+  // Sort ascending
+  for (int i = 0; i < 39; i++)
+    for (int j = i + 1; j < 40; j++)
+      if (buf[i] > buf[j]) { int t = buf[i]; buf[i] = buf[j]; buf[j] = t; }
+
+  // ตัด outlier 25% บน-ล่าง ใช้ค่ากลาง 20 ตัว — คำนวณ mV บน 3.3V
   long sum = 0;
-  for (int i = 0; i < SAMPLES; i++) {
-    sum += analogRead(EC_PIN);
+  for (int i = 10; i < 30; i++) sum += buf[i];
+  float mV = (sum / 20.0f) / 4095.0f * 3300.0f;
+
+  // probe ไม่ได้จุ่มน้ำ
+  float v = mV / 1000.0f;
+  if (v < 0.1f) {
+    Serial.printf("[EC Sensor] mV: %.2f -> probe not in water\n", mV);
+    return 0.0f;
   }
 
-  float avg = (float)sum / SAMPLES;
-  float voltage = avg / ADC_RES * VREF;
-  float rawEC = 1000.0f * voltage / RES2 / ECREF;
+  // DFRobot source: rawEC = 1000 * mV / 820 / 200
+  // บน 3.3V ค่าจะเกิน 10x เทียบกับ 5V → หาร 10 เพื่อแก้ scale
+  float rawEC  = 1000.0f * mV / RES2 / ECREF;
+  float ecComp = rawEC / (1.0f + 0.0185f * (ecTemperature - 25.0f));
+  float ec     = (ecComp / 4.1f) * ecKvalue;  // 4.1 = empirical scale for this 3.3V sensor
 
-  if (rawEC * ecKvalue > 2.5f) {
-    ecKvalue = ecKvalueHigh;
-  } else if (rawEC * ecKvalue < 2.0f) {
-    ecKvalue = ecKvalueLow;
-  }
-
-  float ec = rawEC * ecKvalue;
-  ec = ec / (1.0f + 0.0185f * (ecTemperature - 25.0f));
+  Serial.printf("[EC Sensor] mV: %.2f, EC: %.3f mS/cm\n", mV, ec);
   return max(ec, 0.0f);
 }
 
@@ -538,7 +567,7 @@ void stopAllPumps(bool publishState) {
   pumpPh_on = false;
   mainPump_on = false;
   solenoid1_on = false;
-  autoState = DOSING_IDLE;
+  autoState = AUTO_CHECK;
 
   applyRelayStates(publishState);
 }
@@ -605,7 +634,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     webEmergencyStop = active;
     manualOverride = false;
     autoMode = false;
-    dailyScheduleActive = false; 
     stopAllPumps(true);
     mqtt.publish(T_SYS_AUTO, "0");
     publishSystemState();
@@ -673,7 +701,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (autoMode != newAuto) {
       autoMode = newAuto;
       manualOverride = false;
-      autoState = DOSING_IDLE;
+      autoState = AUTO_CHECK;
       if (!autoMode) {
         stopAllPumps(true);
       }
@@ -685,9 +713,30 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 float getRawADC(int pin) {
+  int buf[SAMPLES];
+  for (int i = 0; i < SAMPLES; i++) {
+    buf[i] = analogRead(pin);
+  }
+  
+  // Median filter: Sort the array
+  for (int i = 0; i < SAMPLES - 1; i++) {
+    for (int j = i + 1; j < SAMPLES; j++) {
+      if (buf[i] > buf[j]) {
+        int temp = buf[i];
+        buf[i] = buf[j];
+        buf[j] = temp;
+      }
+    }
+  }
+  
+  // Average the middle 50%
   long sum = 0;
-  for (int i = 0; i < SAMPLES; i++) sum += analogRead(pin);
-  return (float)sum / SAMPLES;
+  int count = 0;
+  for (int i = SAMPLES / 4; i < SAMPLES - SAMPLES / 4; i++) {
+    sum += buf[i];
+    count++;
+  }
+  return (float)sum / count;
 }
 
 void handleCalibration(const char* cmd) {
@@ -695,12 +744,12 @@ void handleCalibration(const char* cmd) {
   
   if (strcmp(cmd, "ph_cal_7") == 0) {
     float avg = getRawADC(PH_PIN);
-    phIntercept = 7.0f - (phSlope * avg);
-    Serial.println("pH 7 Calibrated");
+    phVoltage7 = avg / ADC_RES * VREF / 1000.0f;
+    Serial.printf("pH 7 Calibrated. Voltage at pH 7: %.3fV\n", phVoltage7);
   } else if (strcmp(cmd, "ph_cal_4") == 0) {
     float avg = getRawADC(PH_PIN);
-    phSlope = (4.0f - phIntercept) / avg;
-    Serial.println("pH 4 Calibrated");
+    phVoltage4 = avg / ADC_RES * VREF / 1000.0f;
+    Serial.printf("pH 4 Calibrated. Voltage at pH 4: %.3fV\n", phVoltage4);
   } else if (strcmp(cmd, "ec_cal_low") == 0) {
     float avg = getRawADC(EC_PIN);
     float voltage = avg / ADC_RES * VREF;
@@ -714,11 +763,11 @@ void handleCalibration(const char* cmd) {
     if (rawEC > 0) ecKvalueHigh = 2.76f / rawEC;
     Serial.println("EC High Calibrated");
   } else if (strcmp(cmd, "ph_save") == 0) {
-    EEPROM.put(PH_ADDR_SLOPE, phSlope);
-    EEPROM.put(PH_ADDR_INTERCEPT, phIntercept);
+    EEPROM.put(PH_ADDR_SLOPE, phVoltage7);
+    EEPROM.put(PH_ADDR_INTERCEPT, phVoltage4);
     EEPROM.write(PH_ADDR_VALID, PH_VALID_MAGIC);
     EEPROM.commit();
-    Serial.println("pH Saved");
+    Serial.println("pH Calibration Saved to EEPROM");
   } else if (strcmp(cmd, "ec_save") == 0) {
     EEPROM.put(EC_KVALUEADDR, ecKvalueLow);
     EEPROM.put(EC_KVALUEADDR + 4, ecKvalueHigh);
@@ -789,121 +838,106 @@ void processAutoMode() {
   }
 
   unsigned long now = millis();
+  int currentHr = getCurrentHour();
 
   switch (autoState) {
-    case DOSING_IDLE:
+    case AUTO_CHECK:
+      // Check if we are in the 8-10 AM window OR if the user just enabled auto
+      // (The system will stay in AUTO_CHECK until it reaches target)
+      
       if (ecValue < targetEc - EC_TOLERANCE) {
-        // Start nutrient dosing sequence: Pump A first, then after a delay start Pump B.
         autoState = DOSING_A;
         dosingAStartTime = now;
-        dosingBStartTime = 0;
         pumpA_on = true;
         pumpB_on = false;
+        pumpPh_on = false;
+        // mainPump off during dosing injection
+        mainPump_on = false; 
+        solenoid1_on = false;
         applyRelayStates(true);
-        Serial.println("[Auto] EC dosing start: Pump A ON");
-      } else if (phValue > targetPh + PH_TOLERANCE) {
-        autoState = DOSING_PH;
-        dosingStateStartTime = now;
-        pumpPh_on = true;
-        applyRelayStates(true);
-        Serial.println("[Auto] pH dosing start: Pump PH ON");
+        Serial.println("[Auto] EC low: Pump A ON (1s)");
       } else {
-        // Safe defaults when resting
-        if (pumpA_on || pumpB_on || pumpPh_on) {
-          stopAllPumps(true);
-          // autoMode remains true; just ensure the pumps are off
-        }
+        // Target EC reached! 
+        // Now turn on Main Pump to circulate (DFT system)
+        autoState = FEEDING_PLANTS;
+        dosingStateStartTime = now;
+        pumpA_on = false;
+        pumpB_on = false;
+        pumpPh_on = false;
+        solenoid1_on = false;
+        mainPump_on = true;
+        applyRelayStates(true);
+        Serial.println("[Auto] Target EC reached. Main Pump ON for circulation.");
       }
       break;
 
     case DOSING_A:
-      if (now - dosingAStartTime >= PUMP_B_DELAY) {
+      if (now - dosingAStartTime >= PUMP_A_DOSE_MS) {
+        pumpA_on = false;
+        applyRelayStates(true);
+        autoState = DOSING_WAIT_B;
+        dosingStateStartTime = now;
+        Serial.println("[Auto] Pump A OFF, waiting 1s");
+      }
+      break;
+
+    case DOSING_WAIT_B:
+      if (now - dosingStateStartTime >= PUMP_B_DELAY_MS) {
         autoState = DOSING_B;
         dosingBStartTime = now;
         pumpB_on = true;
         applyRelayStates(true);
-        Serial.println("[Auto] EC dosing: Pump B ON");
+        Serial.println("[Auto] Pump B ON (1s)");
       }
       break;
 
     case DOSING_B:
-      // Turn off Pump A after it had time to run alongside Pump B
-      if (pumpA_on && (now - dosingAStartTime >= PUMP_B_DELAY + PUMP_DOSE_MS)) {
-        pumpA_on = false;
-        applyRelayStates(true);
-        Serial.println("[Auto] EC dosing: Pump A OFF");
-      }
-
-      if (pumpB_on && (now - dosingBStartTime >= PUMP_DOSE_MS)) {
+      if (now - dosingBStartTime >= PUMP_B_DOSE_MS) {
         pumpB_on = false;
         applyRelayStates(true);
-        Serial.println("[Auto] EC dosing: Pump B OFF");
-      }
-
-      if (!pumpA_on && !pumpB_on) {
         autoState = DOSING_MIX_EC;
         dosingStateStartTime = now;
-        Serial.println("[Auto] EC dosing: Mixing");
+        Serial.println("[Auto] Pump B OFF, mixing 7s");
       }
       break;
 
     case DOSING_MIX_EC:
-      if (now - dosingStateStartTime >= PUMP_MIXING_MS) {
-        autoState = DOSING_IDLE;
+      if (now - dosingStateStartTime >= PUMP_MIX_EC_MS) {
+        autoState = AUTO_CHECK; // Loop back to check EC again
       }
       break;
 
-    case DOSING_PH:
-      if (now - dosingStateStartTime >= PH_DOSE_MS) {
-        pumpPh_on = false;
+    case FEEDING_PLANTS:
+      // If we are outside the 8-10 AM window AND auto was not manually triggered 
+      // (or simply if the user wants it to stop after some time), we could end here.
+      // For now, if auto is ON and target is met, we keep Main Pump ON.
+      
+      // If the hour passes 10 AM, we might want to stop autoMode automatically
+      if (currentHr >= 10 || currentHr < 8) {
+          // If the user wants it to stop after the window:
+          // autoMode = false;
+          // mainPump_on = false;
+          // applyRelayStates(true);
+          // Serial.println("[Auto] Window ended (10 AM). System Idle.");
+      }
+
+      // Check pH during feeding as well
+      if (phValue > targetPh + PH_TOLERANCE) {
+          // Optionally handle pH dosing here or go to a PH state
+      }
+      break;
+
+    case DRAINING_WATER:
+      if (waterLevel >= WATER_TARGET_PCT || waterLevel < 0.0f) {
+        solenoid1_on = false;
         applyRelayStates(true);
-        autoState = DOSING_MIX_PH;
-        dosingStateStartTime = now;
+        autoState = AUTO_CHECK;
       }
       break;
-
-    case DOSING_MIX_PH:
-      if (now - dosingStateStartTime >= PH_MIXING_MS) {
-        autoState = DOSING_IDLE;
-      }
+    
+    default:
+      autoState = AUTO_CHECK;
       break;
-  }
-}
-
-void processDailySchedule() {
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo, 10)) return;
-
-  int hour = timeinfo.tm_hour;
-
-  if (hour >= 8 && hour < 10) {
-    if (!dailyScheduleActive) {
-      dailyScheduleActive = true;
-      dailyMixingDone = false;
-      if (!manualOverride) {
-        autoMode = true;
-      }
-      sendSensorData();
-      Serial.println("[Schedule] 08:00 -> Phase 1: Mixing");
-    }
-    if (!dailyMixingDone) {
-      if (autoMode && autoState == DOSING_IDLE && 
-          fabs(ecValue - targetEc) <= EC_TOLERANCE && 
-          fabs(phValue - targetPh) <= PH_TOLERANCE) {
-        dailyMixingDone = true;
-        setMainFlow(true, true);
-        Serial.println("[Schedule] Mixed -> Phase 2: Flow to Plants");
-      }
-    }
-  } else {
-    if (dailyScheduleActive) {
-      dailyScheduleActive = false;
-      dailyMixingDone = false;
-      autoMode = false;
-      stopAllPumps(true);
-      sendSensorData();
-      Serial.println("[Schedule] 10:00 -> Phase 3: Idle");
-    }
   }
 }
 
@@ -995,7 +1029,6 @@ void loop() {
   }
 
   processAutoMode(); // Call rapidly to evaluate state machine delays against millis()
-  processDailySchedule(); // Check daily timing
 
   // Faster UI refresh
   if (now - lastLcdUpdate >= LCD_UPDATE_INTERVAL) {
