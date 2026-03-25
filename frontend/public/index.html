@@ -2752,8 +2752,8 @@
             // EC line
             drawLine(ctx, ecHistory, 0, 5, pad, plotW, plotH, ecColor, 2.5);
 
-            // pH (normalize 4-9 → 0-5)
-            const phNorm = phHistory.map(v => (v - 4));
+            // pH (normalize 4-14 → 0-5)
+            const phNorm = phHistory.map(v => (v - 4) * 5 / 10);
             drawLine(ctx, phNorm, 0, 5, pad, plotW, plotH, phColor, 2.5);
         }
 
