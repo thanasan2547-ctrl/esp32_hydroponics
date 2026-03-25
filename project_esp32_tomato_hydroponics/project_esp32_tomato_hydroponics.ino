@@ -144,6 +144,7 @@ const unsigned long WIFI_LOG_INTERVAL = 1500;
 
 // ---- Auto dosing ----
 bool autoMode = false;
+bool lastAutoMode = false; // For detecting manual trigger (OFF -> ON)
 // When a user toggles a pump manually (button or MQTT), we suspend automatic dosing until
 // auto mode is explicitly re-enabled. This prevents auto logic from fighting manual input.
 bool manualOverride = false;
@@ -159,9 +160,9 @@ unsigned long dosingAStartTime = 0;
 unsigned long dosingBStartTime = 0;
 
 const unsigned long PUMP_A_DOSE_MS = 1000;      // 1s
-const unsigned long PUMP_B_DELAY_MS = 1000;     // 1s wait
+const unsigned long PUMP_B_DELAY_MS = 10000;     // 10s wait (mix after A)
 const unsigned long PUMP_B_DOSE_MS = 1000;      // 1s
-const unsigned long PUMP_MIX_EC_MS = 7000;      // 7s mix/wait before next check
+const unsigned long PUMP_MIX_EC_MS = 10000;     // 10s mix (after both)
 const unsigned long PH_DOSE_MS = 1500;          // Dose pH for 1.5s
 const unsigned long PH_MIXING_MS = 20000;       // Mix pH for 20s
 const float WATER_TARGET_PCT = 80.0f;
@@ -833,40 +834,46 @@ void sendSensorData() {
 
 void processAutoMode() {
   if (!autoMode || emergencyStopActive || webEmergencyStop || manualOverride) {
+    lastAutoMode = autoMode;
     return;
   }
+
+  // Detect manual toggle from OFF to ON
+  bool manualTrigger = (autoMode && !lastAutoMode);
+  lastAutoMode = autoMode;
 
   unsigned long now = millis();
   int currentHr = getCurrentHour();
 
   switch (autoState) {
     case AUTO_CHECK:
-      // Check if we are in the 8-10 AM window OR if the user just enabled auto
-      // (The system will stay in AUTO_CHECK until it reaches target)
-      
-      if (ecValue < targetEc - EC_TOLERANCE) {
-        autoState = DOSING_A;
-        dosingAStartTime = now;
-        pumpA_on = true;
-        pumpB_on = false;
-        pumpPh_on = false;
-        // mainPump off during dosing injection
-        mainPump_on = false; 
-        solenoid1_on = false;
-        applyRelayStates(true);
-        Serial.println("[Auto] EC low: Pump A ON (1s)");
-      } else {
-        // Target EC reached! 
-        // Now turn on Main Pump to circulate (DFT system)
-        autoState = FEEDING_PLANTS;
-        dosingStateStartTime = now;
-        pumpA_on = false;
-        pumpB_on = false;
-        pumpPh_on = false;
-        solenoid1_on = false;
-        mainPump_on = true;
-        applyRelayStates(true);
-        Serial.println("[Auto] Target EC reached. Main Pump ON for circulation.");
+      {
+        bool isScheduledTime = (currentHr == 8); 
+        bool isReservoirFull = (waterLevel >= 80.0f);
+        
+        // Start dosing ONLY if:
+        // 1. It's 8 AM and reservoir is full (>=80%)
+        // 2. OR the user just manually turned on Auto Mode
+        // 3. AND EC is still below target
+        if ((manualTrigger || (isScheduledTime && isReservoirFull)) && (ecValue < targetEc - EC_TOLERANCE)) {
+          autoState = DOSING_A;
+          dosingAStartTime = now;
+          pumpA_on = true;
+          pumpB_on = false;
+          pumpPh_on = false;
+          mainPump_on = false; 
+          solenoid1_on = false;
+          applyRelayStates(true);
+          Serial.println("[Auto] Cycle Started: Pump A ON (1s)");
+        } 
+        // If EC is already reached (e.g. at 8 AM it's already fine), just go to feeding
+        else if ((manualTrigger || (isScheduledTime && isReservoirFull)) && (ecValue >= targetEc - EC_TOLERANCE)) {
+          autoState = FEEDING_PLANTS;
+          dosingStateStartTime = now;
+          mainPump_on = true;
+          applyRelayStates(true);
+          Serial.println("[Auto] EC OK. Main Pump ON for DFT.");
+        }
       }
       break;
 
@@ -876,7 +883,7 @@ void processAutoMode() {
         applyRelayStates(true);
         autoState = DOSING_WAIT_B;
         dosingStateStartTime = now;
-        Serial.println("[Auto] Pump A OFF, waiting 1s");
+        Serial.println("[Auto] Pump A OFF, mixing 10s");
       }
       break;
 
@@ -896,7 +903,7 @@ void processAutoMode() {
         applyRelayStates(true);
         autoState = DOSING_MIX_EC;
         dosingStateStartTime = now;
-        Serial.println("[Auto] Pump B OFF, mixing 7s");
+        Serial.println("[Auto] Pump B OFF, mixing 10s");
       }
       break;
 
@@ -909,17 +916,14 @@ void processAutoMode() {
     case FEEDING_PLANTS:
       // Safety: Stop Main Pump if reservoir is empty (0-5%)
       if (mainPump_on && waterLevel <= 5.0f && waterLevel >= 0.0f) {
-          Serial.println("[Auto] Reservoir empty (5%). Stopping Main Pump safety.");
+          Serial.println("[Auto] Reservoir empty (5%). Stopping Main Pump.");
           mainPump_on = false;
           applyRelayStates(true);
+          // Cycle finished for now, wait for manual solenoid release or next 8 AM
       }
 
-      // Automatically end autoMode if it's past 10 AM or before 8 AM
-      if (currentHr != -1 && (currentHr >= 10 || currentHr < 8)) {
-          Serial.println("[Auto] Window ended or outside 8-10 AM. Stopping cycle.");
-          autoMode = false;
-          stopAllPumps(true);
-      }
+      // Automatically end autoMode if it's past 10 AM? 
+      // User said "wait until next day", so we can just leave it in this state.
       break;
 
     case DRAINING_WATER:
