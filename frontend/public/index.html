@@ -2607,55 +2607,69 @@
         }
 
 
-        /* ============================================
-           SENSOR UPDATE
-           ============================================ */
         function updateSensors(ec, ph, water) {
-            // Check for disconnected state specifically when no data arrives
-            const isDisconnected = (ec === '--' || ph === '--');
+            // ป้องกัน JS Crash หน้าขาวในกรณีที่ข้อมูลมาไม่พร้อมกัน (เช่น EC มาแล้ว แต่ pH ยังเป็น null)
+            const safeEC = (ec === null || ec === '--' || isNaN(ec)) ? '--' : parseFloat(ec);
+            const safePH = (ph === null || ph === '--' || isNaN(ph)) ? '--' : parseFloat(ph);
+            const safeWater = (water === null || water === '--' || isNaN(water)) ? '--' : parseFloat(water);
 
-            if (isDisconnected) {
-                el.ecVal.textContent = (ec >= 0.001) ? ec.toFixed(2) : '--';
+            // รอเชื่อมต่อ หรือโหลดข้อมูลรอบแรกยังไม่ครบ
+            if (safeEC === '--' && safePH === '--') {
+                el.ecVal.textContent = '--';
                 el.ecBadge.textContent = 'Disconnected';
                 el.ecBadge.className = 'sensor-badge badge-warn';
-                el.ecTarget.textContent = formatTargetLabel(targetEC);
 
-                el.phVal.textContent = (ph > 0 && ph < 13.9) ? ph.toFixed(1) : '--';
+                el.phVal.textContent = '--';
                 el.phBadge.textContent = 'Disconnected';
                 el.phBadge.className = 'sensor-badge badge-warn';
-                el.phTarget.textContent = formatTargetLabel(targetPH);
 
-                el.waterVal.textContent = (typeof water === 'number') ? Math.round(water) : '--';
-                el.waterBar.style.width = (typeof water === 'number') ? water + '%' : '0%';
+                el.waterVal.textContent = '--';
+                el.waterBar.style.width = '0%';
                 el.waterBar.style.background = '';
                 return;
             }
 
-            // EC
-            el.ecVal.textContent = ec.toFixed(2);
-            const ecS = getECStatus(ec);
-            el.ecBadge.textContent = ecS.text;
-            el.ecBadge.className = 'sensor-badge ' + ecS.cls;
+            // --- อัปเดต EC ---
+            if (safeEC !== '--') {
+                el.ecVal.textContent = safeEC.toFixed(2);
+                const ecS = getECStatus(safeEC);
+                el.ecBadge.textContent = ecS.text;
+                el.ecBadge.className = 'sensor-badge ' + (ecS.cls || 'badge-ok');
+            } else {
+                el.ecVal.textContent = '--';
+                el.ecBadge.textContent = 'Waiting...';
+                el.ecBadge.className = 'sensor-badge badge-warn';
+            }
             el.ecTarget.textContent = formatTargetLabel(targetEC);
 
-            // pH
-            el.phVal.textContent = ph.toFixed(1);
-            const phS = getPHStatus(ph);
-            el.phBadge.textContent = phS.text;
-            el.phBadge.className = 'sensor-badge ' + phS.cls;
+            // --- อัปเดต pH ---
+            if (safePH !== '--') {
+                el.phVal.textContent = safePH.toFixed(1);
+                const phS = getPHStatus(safePH);
+                el.phBadge.textContent = phS.text;
+                el.phBadge.className = 'sensor-badge ' + (phS.cls || 'badge-ok');
+            } else {
+                el.phVal.textContent = '--';
+                el.phBadge.textContent = 'Waiting...';
+                el.phBadge.className = 'sensor-badge badge-warn';
+            }
             el.phTarget.textContent = formatTargetLabel(targetPH);
 
-            // Water
-            const pct = Math.max(0, Math.min(100, water));
-            el.waterVal.textContent = Math.round(pct);
-            el.waterBar.style.width = pct + '%';
-
-            // Water bar color
-            if (pct < 20) {
-                el.waterBar.style.background = 'linear-gradient(90deg, #FCA5A5, #EF4444)';
-            } else if (pct < 40) {
-                el.waterBar.style.background = 'linear-gradient(90deg, #FDE68A, #F59E0B)';
+            // --- อัปเดต Water ---
+            if (safeWater !== '--') {
+                const pct = Math.max(0, Math.min(100, safeWater));
+                el.waterVal.textContent = Math.round(pct);
+                el.waterBar.style.width = pct + '%';
+                if (pct < 20) {
+                    el.waterBar.style.background = 'linear-gradient(90deg, #FCA5A5, #EF4444)';
+                } else if (pct < 40) {
+                    el.waterBar.style.background = 'linear-gradient(90deg, #FDE68A, #F59E0B)';
+                } else {
+                    el.waterBar.style.background = '';
+                }
             } else {
+                el.waterVal.textContent = '--';
+                el.waterBar.style.width = '0%';
                 el.waterBar.style.background = '';
             }
 
