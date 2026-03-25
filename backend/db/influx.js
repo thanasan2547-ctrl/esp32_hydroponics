@@ -13,8 +13,14 @@ function init() {
   const org = process.env.INFLUX_ORG;
   const bucket = process.env.INFLUX_BUCKET;
 
-  if (!url || !token || !org || !bucket) {
-    console.warn('[InfluxDB] Missing config — history storage disabled');
+  const missing = [];
+  if (!url) missing.push('INFLUX_URL');
+  if (!token) missing.push('INFLUX_TOKEN');
+  if (!org) missing.push('INFLUX_ORG');
+  if (!bucket) missing.push('INFLUX_BUCKET');
+
+  if (missing.length > 0) {
+    console.warn(`[InfluxDB] Missing config: ${missing.join(', ')} — history storage disabled`);
     return false;
   }
 
@@ -72,6 +78,9 @@ async function querySensorHistory(sensorType, range = '-1h', aggregateWindow = '
       |> aggregateWindow(every: ${aggregateWindow}, fn: mean, createEmpty: false)
       |> yield(name: "mean")
   `;
+
+
+
 
   const results = [];
   return new Promise((resolve, reject) => {
