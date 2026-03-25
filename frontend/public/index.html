@@ -2673,13 +2673,19 @@
                 el.waterBar.style.background = '';
             }
 
-            // History
-            ecHistory.push(ec);
-            phHistory.push(ph);
-            waterHistory.push(water);
-            if (ecHistory.length > MAX_HISTORY) ecHistory.shift();
-            if (phHistory.length > MAX_HISTORY) phHistory.shift();
-            if (waterHistory.length > MAX_HISTORY) waterHistory.shift();
+            // History — only push valid numbers (not '--')
+            if (safeEC !== '--') {
+                ecHistory.push(safeEC);
+                if (ecHistory.length > MAX_HISTORY) ecHistory.shift();
+            }
+            if (safePH !== '--') {
+                phHistory.push(safePH);
+                if (phHistory.length > MAX_HISTORY) phHistory.shift();
+            }
+            if (safeWater !== '--') {
+                waterHistory.push(safeWater);
+                if (waterHistory.length > MAX_HISTORY) waterHistory.shift();
+            }
 
             drawChart();
         }
