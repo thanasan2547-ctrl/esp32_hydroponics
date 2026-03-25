@@ -906,9 +906,15 @@ void processAutoMode() {
       }
       break;
 
-      // Keep Main Pump ON during the window. 
-      // If it passes 10 AM or is before 8 AM, stop the auto cycle.
-      // Note: only stop if time is actually set (currentHr != -1)
+    case FEEDING_PLANTS:
+      // Safety: Stop Main Pump if reservoir is empty (0-5%)
+      if (mainPump_on && waterLevel <= 5.0f && waterLevel >= 0.0f) {
+          Serial.println("[Auto] Reservoir empty (5%). Stopping Main Pump safety.");
+          mainPump_on = false;
+          applyRelayStates(true);
+      }
+
+      // Automatically end autoMode if it's past 10 AM or before 8 AM
       if (currentHr != -1 && (currentHr >= 10 || currentHr < 8)) {
           Serial.println("[Auto] Window ended or outside 8-10 AM. Stopping cycle.");
           autoMode = false;
